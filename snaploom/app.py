@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import plistlib
 import re
@@ -68,7 +67,6 @@ class Application:
         self.pin_windows = {}
         self.hidden_pins = []
         self.closed_pins = []
-        self.last_fingerprint = None
         self.last_region = next(iter(self.workspace.regions()), None)
         self.group = self.workspace.get("current_group") or "Default"
         self.previous_group = self.group
@@ -105,6 +103,7 @@ class Application:
                 self.open_pin(image, pin_id=pin_id, state=state, restore=True)
                 if not state.get("visible", True):
                     self.closed_pins.append(pin_id)
+        self.closed_pins.sort(key=lambda pin_id: (self.pin_windows[pin_id].state.get("hidden_at", 0), pin_id))
         self.update_lists()
         if not testing:
             qt.aboutToQuit.connect(self.shutdown)
@@ -148,7 +147,7 @@ class Application:
             ("screen", "Current display", "当前屏幕"), ("full", "All displays", "所有屏幕"),
             ("active", "Active window", "当前窗口"), ("repeat", "Repeat last capture", "重复上次区域"),
             ("custom", "Size and delay…", "尺寸与延时…"), ("whiteboard", "Whiteboard…", "白板…"),
-            ("paste", "Paste or restore a pin", "贴图或恢复"), ("open", "Open image…", "打开图像…"),
+            ("paste", "Pin clipboard content", "悬浮剪贴板内容"), ("open", "Open image…", "打开图像…"),
         ):
             self.tray_menu.addAction(self.tr(en, zh), lambda checked=False, name=action: self.action(name))
         self.tray_menu.addSeparator()
@@ -162,6 +161,7 @@ class Application:
         groups.addAction(self.tr("New group…", "新建分组…"), self.create_group)
         groups.addAction(self.tr("Manage groups…", "管理分组…"), self.manage_groups)
         for action, en, zh in (
+            ("restore-last-pin", "Restore last hidden pin", "恢复最近隐藏的贴图"),
             ("toggle_pins", "Show or hide pins", "显示或隐藏贴图"),
             ("recover", "Recover off-screen pins", "找回屏幕外贴图"),
             ("click_through", "Toggle pin click-through", "切换贴图鼠标穿透"),
@@ -174,7 +174,7 @@ class Application:
         unavailable = self.hotkeys.configure(shortcuts if self.hotkeys_enabled else {})
         labels = [
             f'{self.tr("Capture", "截图")}  {shortcuts.get("capture") or "—"}',
-            f'{self.tr("Paste", "贴图")}  {shortcuts.get("paste") or "—"}',
+            f'{self.tr("Pin clipboard", "悬浮剪贴板")}  {shortcuts.get("paste") or "—"}',
             f'{self.tr("Hide/show pins", "显示／隐藏贴图")}  {shortcuts.get("toggle_pins") or "—"}',
         ]
         if unavailable:
@@ -214,6 +214,8 @@ class Application:
             self.capture(modes[action])
         elif action == "paste":
             self.paste()
+        elif action == "restore-last-pin":
+            self.restore_last_pin()
         elif action == "open":
             files, _ = QFileDialog.getOpenFileNames(self.dashboard, self.tr("Open image", "打开图像"), "",
                                                    self.tr("Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tiff *.svg)", "图像 (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tiff *.svg)"))
@@ -775,10 +777,11 @@ class Application:
             window.deleteLater()
             self.rebuild_tray()
         elif action == "hide":
+            if not window.state["visible"]:
+                return
             window.hide()
             window.state["visible"] = False
-            if pin_id in self.closed_pins:
-                self.closed_pins.remove(pin_id)
+            window.state["hidden_at"] = time.time_ns()
             self.closed_pins.append(pin_id)
             self.save_pin(pin_id)
         elif action == "show":
@@ -995,6 +998,16 @@ class Application:
                     window.show()
         self.update_lists()
 
+    def restore_last_pin(self):
+        while self.closed_pins:
+            pin_id = self.closed_pins.pop()
+            window = self.pin_windows.get(pin_id)
+            if window is not None and not window.state["visible"]:
+                self.pin_action("show", pin_id)
+                self.status(self.tr("The last hidden pin is visible again.", "已重新显示最近隐藏的贴图。"))
+                return
+        self.notify(self.tr("There are no hidden pins to restore.", "没有隐藏的贴图可恢复。"))
+
     def paste(self, position=None):
         mime = self.qt.clipboard().mimeData()
         if mime and mime.hasText() and self.workspace.get("allow_remote_images"):
@@ -1008,19 +1021,12 @@ class Application:
                 self.open_files(local, position)
                 return
         images = clipboard_images(mime)
-        if images:
-            fingerprint = hashlib.sha256(png_bytes(images[0])).digest()
-            if fingerprint != self.last_fingerprint or not self.closed_pins:
-                self.last_fingerprint = fingerprint
-                for image in images:
-                    self.open_pin(image, position, state=self.clipboard_state(mime))
-                return
-        while self.closed_pins:
-            pin_id = self.closed_pins.pop()
-            if pin_id in self.pin_windows and not self.pin_windows[pin_id].state["visible"]:
-                self.pin_action("show", pin_id)
-                return
-        self.notify(self.tr("Clipboard has no supported content.", "剪贴板中没有可贴图的内容。"))
+        if not images:
+            self.notify(self.tr("Copy an image, text, or color before pinning clipboard content.",
+                                "请先复制图片、文字或色值，再悬浮剪贴板内容。"))
+            return
+        for image in images:
+            self.open_pin(image, position, state=self.clipboard_state(mime))
 
     def fetch_pin(self, url, position=None):
         request = QNetworkRequest(url)
@@ -1451,10 +1457,12 @@ class Application:
     def help(self):
         QMessageBox.information(
             self.dashboard, "Snaploom",
-            self.tr("F1 captures a region. Enter copies the screenshot. F3 pastes or restores a pin. "
+            self.tr("F1 captures a region. Enter copies the screenshot. F3 pins clipboard content above other windows. "
+                    "Use Restore last hidden pin to show a pin you previously hid. "
                     "Hold Alt during capture to magnify. "
                     "Open Settings to customize these shortcuts. The More menu includes offline text and barcode recognition.",
-                    "F1 区域截图，回车复制，F3 从剪贴板贴图或恢复贴图。"
+                    "F1 区域截图，回车复制，F3 将剪贴板内容悬浮在其他窗口上方。"
+                    "要重新显示隐藏的贴图，可点「恢复最近隐藏的贴图」。"
                     "截图时按住 Alt 查看放大镜。"
                     "可在设置中更改快捷键，截图工具栏的「更多」提供离线文字和条码识别。"),
         )

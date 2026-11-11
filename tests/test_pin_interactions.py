@@ -61,17 +61,22 @@ class PinInteractionTests(unittest.TestCase):
         mime = QMimeData()
         mime.setText(link)
         clipboard = SimpleNamespace(mimeData=lambda: mime)
-        button = self.application.dashboard.findChild(QPushButton, "Secondary")
+        app = self.application
+        button = app.dashboard.findChild(QPushButton, "Secondary")
+        restore_text = app.tr("Restore last hidden pin", "恢复最近隐藏的贴图")
+        restore = next(button for button in app.dashboard.findChildren(QPushButton) if button.text() == restore_text)
         with (
             patch.object(self.application, "fetch_pin") as fetch,
             patch.object(self.qt, "clipboard", return_value=clipboard) as read_clipboard,
         ):
-            QTest.mouseMove(button, button.rect().center())
-            self.hover(button, button.rect().center())
-            QTest.qWait(750)
-            self.assertEqual(self.application.pin_windows, {})
-            self.assertIsNone(self.qt.activePopupWidget())
-            read_clipboard.assert_not_called()
+            for control in (button, restore):
+                point = control.rect().center()
+                QTest.mouseMove(control, point)
+                self.hover(control, point)
+                QTest.qWait(750)
+                self.assertEqual(app.pin_windows, {})
+                self.assertIsNone(self.qt.activePopupWidget())
+                read_clipboard.assert_not_called()
             QTest.mouseClick(button, Qt.MouseButton.LeftButton)
             read_clipboard.assert_called_once()
             fetch.assert_not_called()
@@ -88,8 +93,9 @@ class PinInteractionTests(unittest.TestCase):
         self.assertFalse(pin.isVisible())
         self.assertFalse(pin.state["visible"])
 
-        with patch.object(self.qt, "clipboard", return_value=clipboard):
-            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        with patch.object(self.qt, "clipboard", return_value=clipboard) as read_clipboard:
+            QTest.mouseClick(restore, Qt.MouseButton.LeftButton)
+            read_clipboard.assert_not_called()
         self.assertEqual(list(self.application.pin_windows), [pin_id])
         self.assertTrue(pin.isVisible())
 

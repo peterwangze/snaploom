@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 
 LABELS = {
-    "capture": "Capture a region", "paste": "Paste or restore a pin",
+    "capture": "Capture a region", "paste": "Pin clipboard content",
     "toggle_pins": "Show or hide pins", "repeat": "Repeat last capture",
     "click_through": "Toggle pin click-through", "active": "Capture the active window",
 }

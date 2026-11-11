@@ -18,7 +18,7 @@ from .hotkeys import LABELS
 
 
 HOTKEY_ZH = {
-    "capture": "区域截图", "paste": "从剪贴板贴图／恢复贴图", "toggle_pins": "显示或隐藏贴图",
+    "capture": "区域截图", "paste": "悬浮剪贴板内容", "toggle_pins": "显示或隐藏贴图",
     "repeat": "重复上次区域", "click_through": "切换贴图鼠标穿透", "active": "截取当前窗口",
 }
 
@@ -105,7 +105,7 @@ class Dashboard(QWidget):
         actions = QHBoxLayout()
         for action, en, zh, style in (
             ("capture", "Capture region", "区域截图", "Primary"),
-            ("paste", "Paste or restore pin", "贴图或恢复", "Secondary"),
+            ("paste", "Pin clipboard content", "悬浮剪贴板内容", "Secondary"),
         ):
             button = QPushButton(self.tr(en, zh), objectName=style)
             button.setMinimumHeight(55)
@@ -129,8 +129,16 @@ class Dashboard(QWidget):
                 line.addWidget(button, 1)
             layout.addLayout(line)
         layout.addSpacing(10)
+        pin_hint = QLabel(self.tr("Keep a screenshot, image, or text above other windows while you work.",
+                                  "贴图会把截图、图片或文字悬浮在其他窗口上方，方便随时对照。"))
+        pin_hint.setWordWrap(True)
+        layout.addWidget(pin_hint)
         line = QHBoxLayout()
-        for action, en, zh in (("open", "Open image…", "打开图像…"), ("toggle_pins", "Show or hide pins", "显示或隐藏贴图")):
+        for action, en, zh in (
+            ("open", "Open image…", "打开图像…"),
+            ("restore-last-pin", "Restore last hidden pin", "恢复最近隐藏的贴图"),
+            ("toggle_pins", "Show or hide pins", "显示或隐藏贴图"),
+        ):
             button = QPushButton(self.tr(en, zh))
             button.clicked.connect(lambda checked=False, selected=action: self.action.emit(selected))
             line.addWidget(button, 1)
@@ -221,7 +229,7 @@ class Preferences(QDialog):
             ("auto_save", "Automatically save every completed capture", "自动保存每次已完成的截图"),
             ("copy_after_save", "Copy the image after saving", "保存后同时复制图像"),
             ("include_cursor", "Include the cursor in screenshots", "截图包含鼠标指针"),
-            ("restore_pins", "Restore pins on startup", "启动时恢复贴图"),
+            ("restore_pins", "Reopen visible pins on startup", "启动时重新显示上次可见的贴图"),
             ("hide_pins_on_capture", "Hide pins during capture", "截图时隐藏贴图"),
             ("run_at_login", "Start at sign-in", "登录时启动"),
             ("start_hidden", "Start in the tray", "启动后收起到托盘"),

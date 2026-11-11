@@ -215,7 +215,7 @@ class UserJourneyTests(unittest.TestCase):
     def test_cancel_capture_restores_dashboard_and_previously_visible_pins(self):
         app = self.application
         self.qt.clipboard().setText("Keep this text")
-        self.click(self.button(app.dashboard, "Paste or restore pin", "贴图或恢复"))
+        self.click(self.button(app.dashboard, "Pin clipboard content", "悬浮剪贴板内容"))
         pin, = app.pin_windows.values()
         app.workspace.set("hide_pins_on_capture", True)
         editor = self.open_capture()
@@ -311,7 +311,7 @@ class UserJourneyTests(unittest.TestCase):
     def test_clipboard_pin_can_be_hidden_restored_and_reopened_after_restart(self):
         app = self.application
         self.qt.clipboard().setImage(self.image.copy(QRect(0, 0, 280, 90)))
-        paste = self.button(app.dashboard, "Paste or restore pin", "贴图或恢复")
+        paste = self.button(app.dashboard, "Pin clipboard content", "悬浮剪贴板内容")
         button_point = paste.mapToGlobal(paste.rect().center())
         self.click(paste)
         pin_id, = app.pin_windows
@@ -319,9 +319,14 @@ class UserJourneyTests(unittest.TestCase):
         self.assertFalse(pin.frameGeometry().contains(button_point))
         QTest.keyClick(pin, Qt.Key.Key_Escape)
         self.assertFalse(pin.isVisible())
-        self.click(paste)
+        self.qt.clipboard().setText("This newer clipboard text should remain untouched")
+        restore = self.button(app.dashboard, "Restore last hidden pin", "恢复最近隐藏的贴图")
+        with patch.object(self.qt, "clipboard") as read_clipboard:
+            self.click(restore)
+            read_clipboard.assert_not_called()
         self.assertEqual(list(app.pin_windows), [pin_id])
         self.assertTrue(pin.isVisible())
+        self.assertEqual(self.qt.clipboard().text(), "This newer clipboard text should remain untouched")
         toggle = self.button(app.dashboard, "Show or hide pins", "显示或隐藏贴图")
         self.click(toggle)
         self.assertFalse(pin.isVisible())
@@ -337,12 +342,67 @@ class UserJourneyTests(unittest.TestCase):
         self.click(self.button(self.application.dashboard, "Delete", "删除"))
         self.assertEqual(list(self.application.workspace.pins()), [])
 
-    def test_paste_again_after_a_hidden_pin_is_shown_or_deleted_from_the_list(self):
+    def test_clipboard_hotkey_creates_another_pin_when_the_same_content_is_hidden(self):
+        app = self.application
+        self.qt.clipboard().setText("A reference to keep in two windows")
+        paste = self.button(app.dashboard, "Pin clipboard content", "悬浮剪贴板内容")
+        self.click(paste)
+        original_id, = app.pin_windows
+        original = app.pin_windows[original_id]
+        QTest.keyClick(original, Qt.Key.Key_Escape)
+        self.assertFalse(original.isVisible())
+
+        app.hotkeys.triggered.emit("paste")
+        new_id, = app.pin_windows.keys() - {original_id}
+        self.assertTrue(app.pin_windows[new_id].isVisible())
+        self.assertFalse(original.isVisible())
+        self.assertEqual(app.pin_windows[new_id].state["source_text"], original.state["source_text"])
+
+    def test_tray_clipboard_action_and_restore_remain_distinct_with_empty_clipboard(self):
+        app = self.application
+
+        def tray_action(en, zh):
+            return next(action for action in app.tray_menu.actions() if action.text() == app.tr(en, zh))
+
+        self.qt.clipboard().setText("Reference pinned from the tray")
+        tray_action("Pin clipboard content", "悬浮剪贴板内容").trigger()
+        pin_id, = app.pin_windows
+        pin = app.pin_windows[pin_id]
+        self.assertTrue(pin.isVisible())
+        QTest.keyClick(pin, Qt.Key.Key_Escape)
+        self.qt.clipboard().clear()
+        tray_action("Pin clipboard content", "悬浮剪贴板内容").trigger()
+        self.assertEqual(list(app.pin_windows), [pin_id])
+        self.assertFalse(pin.isVisible())
+        self.assertEqual(app.dashboard.status.text(), app.tr(
+            "Copy an image, text, or color before pinning clipboard content.",
+            "请先复制图片、文字或色值，再悬浮剪贴板内容。",
+        ))
+
+        with patch.object(self.qt, "clipboard") as read_clipboard:
+            tray_action("Restore last hidden pin", "恢复最近隐藏的贴图").trigger()
+            self.assertTrue(pin.isVisible())
+            tray_action("Restore last hidden pin", "恢复最近隐藏的贴图").trigger()
+            read_clipboard.assert_not_called()
+        self.assertEqual(list(app.pin_windows), [pin_id])
+        self.assertTrue(pin.isVisible())
+        self.assertEqual(app.dashboard.status.text(),
+                         app.tr("There are no hidden pins to restore.", "没有隐藏的贴图可恢复。"))
+
+    def test_restore_skips_a_pin_shown_or_deleted_from_the_list(self):
         for en, zh in (("Show", "显示"), ("Delete", "删除")):
             with self.subTest(action=en):
                 app = self.application
+                paste = self.button(app.dashboard, "Pin clipboard content", "悬浮剪贴板内容")
+                self.qt.clipboard().setText("Earlier reference")
+                previous = set(app.pin_windows)
+                self.click(paste)
+                earlier_id, = app.pin_windows.keys() - previous
+                earlier = app.pin_windows[earlier_id]
+                QTest.keyClick(earlier, Qt.Key.Key_Escape)
+                self.assertFalse(earlier.isVisible())
+
                 self.qt.clipboard().setText(f"Reference for {en}")
-                paste = self.button(app.dashboard, "Paste or restore pin", "贴图或恢复")
                 previous = set(app.pin_windows)
                 self.click(paste)
                 pin_id, = app.pin_windows.keys() - previous
@@ -355,10 +415,46 @@ class UserJourneyTests(unittest.TestCase):
                 point = pin_list.visualItemRect(pin_list.item(row)).center()
                 QTest.mouseClick(pin_list.viewport(), Qt.MouseButton.LeftButton, pos=point)
                 self.click(self.button(app.dashboard, en, zh))
-                count = len(app.pin_windows)
+                current_pins = set(app.pin_windows)
                 self.select_tab(0)
-                self.click(paste)
-                self.assertEqual(len(app.pin_windows), count + 1)
+                restore = self.button(app.dashboard, "Restore last hidden pin", "恢复最近隐藏的贴图")
+                self.click(restore)
+                self.assertEqual(set(app.pin_windows), current_pins)
+                self.assertTrue(earlier.isVisible())
+
+    def test_restore_remembers_hide_order_after_restart(self):
+        app = self.application
+        paste = self.button(app.dashboard, "Pin clipboard content", "悬浮剪贴板内容")
+        self.qt.clipboard().setText("First created")
+        self.click(paste)
+        first_id, = app.pin_windows
+        self.qt.clipboard().setText("Second created")
+        self.click(paste)
+        second_id, = app.pin_windows.keys() - {first_id}
+        for pin_id in (second_id, first_id):
+            QTest.keyClick(app.pin_windows[pin_id], Qt.Key.Key_Escape)
+            self.assertFalse(app.pin_windows[pin_id].isVisible())
+
+        self.select_tab(2)
+        pins = app.dashboard.pin_list
+        row = next(index for index in range(pins.count())
+                   if pins.item(index).data(Qt.ItemDataRole.UserRole) == second_id)
+        QTest.mouseClick(pins.viewport(), Qt.MouseButton.LeftButton,
+                         pos=pins.visualItemRect(pins.item(row)).center())
+        self.click(self.button(app.dashboard, "Hide", "隐藏"))
+
+        self.stop_application()
+        self.start_application()
+        app = self.application
+        first, second = app.pin_windows[first_id], app.pin_windows[second_id]
+        self.assertFalse(first.isVisible())
+        self.assertFalse(second.isVisible())
+        restore = self.button(app.dashboard, "Restore last hidden pin", "恢复最近隐藏的贴图")
+        self.click(restore)
+        self.assertTrue(first.isVisible())
+        self.assertFalse(second.isVisible())
+        self.click(restore)
+        self.assertTrue(second.isVisible())
 
     def test_dropping_a_local_image_on_the_dashboard_creates_a_pin(self):
         app = self.application
