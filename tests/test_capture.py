@@ -7,6 +7,7 @@ import unittest
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPalette
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from snaploom.capture import ScreenFrame, Snapshot, _composite, capture_desktop
@@ -66,7 +67,7 @@ class NativeDesktopTests(unittest.TestCase):
             point = window.geometry().center()
             expected = QColor("#e32191")
             for _ in range(8):
-                app.processEvents()
+                QTest.qWait(25)
                 snapshot = capture_desktop()
                 if snapshot.color_at(point) == expected:
                     break

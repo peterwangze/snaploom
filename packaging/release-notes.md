@@ -1,6 +1,8 @@
-Snaploom 是离线运行的截图、标注和贴图工具。请选择与你的系统和处理器匹配的安装包。应用、Python 运行时和 OCR 模型都已打包。
+Snaploom 是离线运行的截图、标注和贴图工具。安装包包含应用、运行环境和 OCR 模型。
 
-此版本提供截图、标注、贴图、历史、离线 OCR、条码识别和滚动拼接。Snipaste 功能对照与平台验收边界见 [交付验收记录](https://github.com/peterwangze/snaploom/blob/v1.0.0/docs/release-verification.md)。
+- 区域截图保留原画面亮度，使用高分屏原始帧预览。拖动选区只更新变化区域，按住 Alt 可临时打开放大镜。
+- 从主窗口贴出的内容避开触发按钮。贴图内有隐藏按钮，右键菜单随贴图关闭。修正手动恢复贴图后再次贴图的状态。
+- 增加截图、标注、输出、历史、贴图、设置、识别和滚动拼接的交互测试，以及桌面像素回读测试。 [验收记录](https://github.com/peterwangze/snaploom/blob/v1.0.1/docs/release-verification.md)
 
 | 系统 | 安装包 | 运行条件 |
 | --- | --- | --- |

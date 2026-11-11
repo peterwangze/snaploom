@@ -73,6 +73,7 @@ class Dashboard(QWidget):
         self.tabs.addTab(pins_page, self.tr("Pins", "贴图"))
         bottom = QHBoxLayout()
         self.status = QLabel(self.tr("Ready", "就绪"))
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         self.status.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         bottom.addWidget(self.status)
@@ -219,7 +220,7 @@ class Preferences(QDialog):
             ("start_hidden", "Start in the tray", "启动后收起到托盘"),
             ("allow_remote_images", "Fetch images from clipboard URLs", "允许下载剪贴板网址中的图像"),
             ("show_grid", "Show selection guides", "显示选区参考线"),
-            ("show_magnifier", "Show the magnifier before selection", "选区前显示放大镜"),
+            ("show_magnifier", "Enable the Alt magnifier", "按住 Alt 显示放大镜"),
             ("detect_windows", "Suggest windows and controls under the cursor", "识别指针下的窗口和控件"),
         ):
             box = QCheckBox(self.tr(en, zh))

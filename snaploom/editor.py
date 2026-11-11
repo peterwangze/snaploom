@@ -7,7 +7,7 @@ from math import atan2, cos, hypot, pi, sin
 from PySide6.QtCore import QPoint, QPointF, QRunnable, QRect, QRectF, QSize, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import (
     QColor, QCursor, QFont, QFontMetricsF, QIcon, QImage, QKeySequence, QPainter,
-    QPainterPath, QPen, QPixmap, QPolygonF, QShortcut, QTransform,
+    QPainterPath, QPen, QPixmap, QPolygonF, QRegion, QShortcut, QTransform,
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
@@ -431,8 +431,8 @@ class CaptureEditor(QWidget):
             self._label("Click or press Enter to copy the color at the pointer. Escape cancels.",
                         "单击或按回车复制指针位置的颜色。按 Esc 取消。")
             if self.color_only else self._label(
-                "Drag to select an area. Press Space to start and finish a keyboard selection. Enter copies the capture.",
-                "拖动选择区域。可按空格开始和结束键盘框选。按回车复制截图。",
+                "Drag to select an area. Hold Alt to magnify. Press Space to start and finish a keyboard selection. Enter copies the capture.",
+                "拖动选择区域，按住 Alt 查看放大镜。可按空格开始和结束键盘框选。按回车复制截图。",
             )
         )
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
@@ -466,6 +466,7 @@ class CaptureEditor(QWidget):
                 self._next_numbers[item.series] = min(9999, max(self._next_numbers.get(item.series, 1), int(item.text) + 1))
         self.color = DEFAULT_COLOR
         self.show_magnifier = self.color_only or _read_option(options, "show_magnifier", True)
+        self._magnifying = False
         self.show_guides = _read_option(options, "show_guides", True)
         self.auto_detect = not self.color_only and _read_option(options, "auto_detect", True)
         self._detect_elements = _read_option(options, "detect_elements")
@@ -674,16 +675,16 @@ class CaptureEditor(QWidget):
     def selected_geometry(self):
         return self.selection.translated(self.snapshot.geometry.topLeft()) if not self.selection.isEmpty() else QRect()
 
-    def _set_selection(self, rect, *, show_toolbar=True):
+    def _set_selection(self, rect, *, defer_repaint=False):
         self.selection = QRect(rect).normalized().intersected(self.rect())
-        if show_toolbar:
+        if not defer_repaint:
             self._place_toolbar()
-        self.update()
+            self.update()
 
     def _place_toolbar(self):
         if self._embedded:
             return
-        if self.selection.isEmpty() or self.color_only or self.drag_mode in {"region", "resize"}:
+        if self.selection.isEmpty() or self.color_only or self.drag_mode in {"region", "resize", "move"}:
             self.toolbar.hide()
             return
         self.toolbar.adjustSize()
@@ -795,9 +796,18 @@ class CaptureEditor(QWidget):
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
     def hideEvent(self, event):
+        self._magnifying = False
         if self.toolbar.isWindow():
             self.toolbar.hide()
         super().hideEvent(event)
+
+    def focusOutEvent(self, event):
+        self._set_magnifying(False)
+        super().focusOutEvent(event)
+
+    def leaveEvent(self, event):
+        self._set_magnifying(False)
+        super().leaveEvent(event)
 
     def _selected_annotation(self):
         if len(self.selected_items) != 1:
@@ -1204,7 +1214,9 @@ class CaptureEditor(QWidget):
             width = max(abs(dx), abs(dy) * self.aspect)
             height = width / self.aspect
             end = QPoint(start.x() + round(width) * (-1 if dx < 0 else 1), start.y() + round(height) * (-1 if dy < 0 else 1))
-        return QRect(start, end).normalized().intersected(self.rect())
+        top_left = QPoint(min(start.x(), end.x()), min(start.y(), end.y()))
+        bottom_right = QPoint(max(start.x(), end.x()), max(start.y(), end.y()))
+        return QRect(top_left, bottom_right).intersected(self.rect())
 
     def _constrain_move(self, rect):
         rect = QRect(rect)
@@ -1368,26 +1380,32 @@ class CaptureEditor(QWidget):
             else:
                 self.selected_items.clear()
                 self._update_controls()
+        if self.drag_mode in {"region", "resize", "move"}:
+            self._place_toolbar()
         self.update()
 
     def mouseMoveEvent(self, event):
         old_position = self.position
-        old_hover = self._hover_rect()
+        old_selection = self.selection
+        old_hover = self._hover_rect() if old_selection.isEmpty() else QRect()
+        old_lens = self._visible_magnifier_rect()
         self.position = event.position().toPoint()
+        self._magnifying = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+        damage = QRegion()
         if self.drag_mode == "region":
             if (self.position - self.drag_start).manhattanLength() > 3 or not self.selection.isEmpty():
-                self._set_selection(self._rect_from_points(self.drag_start, self.position))
+                self._set_selection(self._rect_from_points(self.drag_start, self.position), defer_repaint=True)
         elif self.drag_mode == "resize":
-            self._set_selection(self._resize_selection(self.position))
+            self._set_selection(self._resize_selection(self.position), defer_repaint=True)
         elif self.drag_mode == "move":
-            self._set_selection(self._constrain_move(self.original_selection.translated(self.position - self.drag_start)))
+            self._set_selection(self._moved_selection(), defer_repaint=True)
         elif self.drag_mode == "items":
             delta = self.position - self.drag_start
             self.working_annotations = tuple(
                 annotation.moved(delta) if index in self.selected_items else annotation
                 for index, annotation in enumerate(self.original_annotations)
             )
-            self.update(self.selection)
+            damage |= QRegion(self.selection)
         elif self.drag_mode == "annotation":
             point = self._annotation_point(self.position)
             if self.tool == "pen" or (self.tool == "marker" and self.style.currentData() == "default"):
@@ -1395,17 +1413,31 @@ class CaptureEditor(QWidget):
                     self.points.append(point)
             else:
                 self.points = [self.points[0], self._stroke_endpoint(point, event.modifiers())]
-            self.update(self.selection)
+            damage |= QRegion(self.selection)
         elif self.drag_mode == "marquee" or self.line_points:
-            self.update(self.selection)
+            damage |= QRegion(self.selection)
         else:
             self._update_hover()
             if self.position != old_position:
                 self._schedule_probe()
-            if old_hover != self._hover_rect():
-                self.update()
-            elif self._magnifier_visible():
-                self.update(self._magnifier_rect(old_position).united(self._magnifier_rect(self.position)))
+
+        if old_selection != self.selection:
+            damage |= self._outline_region(old_selection) | self._outline_region(self.selection)
+            if self.crop_mode:
+                damage |= QRegion(old_selection).xored(QRegion(self.selection))
+            elif self.document.annotations:
+                damage |= QRegion(old_selection) | QRegion(self.selection)
+        hover = self._hover_rect() if self.selection.isEmpty() else QRect()
+        if old_hover != hover:
+            damage |= self._outline_region(old_hover) | self._outline_region(hover)
+        lens = self._visible_magnifier_rect()
+        if old_position != self.position or old_lens != lens:
+            damage |= QRegion(old_lens) | QRegion(lens)
+        if not damage.isEmpty():
+            self.update(damage)
+
+    def _moved_selection(self):
+        return self._constrain_move(self.original_selection.translated(self.position - self.drag_start))
 
     def mouseReleaseEvent(self, event):
         if self.color_only or event.button() != Qt.MouseButton.LeftButton:
@@ -1424,6 +1456,10 @@ class CaptureEditor(QWidget):
                     self._set_selection(self.original_selection)
             else:
                 self._set_selection(self._rect_from_points(self.drag_start, self.position))
+        elif mode == "resize":
+            self._set_selection(self._resize_selection(self.position))
+        elif mode == "move":
+            self._set_selection(self._moved_selection())
         elif mode == "items" and self.working_annotations is not None:
             self._commit(self.working_annotations)
             self.working_annotations = None
@@ -1534,8 +1570,7 @@ class CaptureEditor(QWidget):
                 self._set_selection(self.rect() if self.selection == current else current)
                 return
             if key == key_code.Key_Alt:
-                self.show_guides = not self.show_guides
-                self.update()
+                self._set_magnifying(True)
                 return
             if key == key_code.Key_M and control:
                 self.show_magnifier = not self.show_magnifier
@@ -1556,6 +1591,12 @@ class CaptureEditor(QWidget):
             self._nudge(directions[key], resize=shift, large=control)
             return
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if not self._embedded and event.key() == Qt.Key.Key_Alt:
+            self._set_magnifying(False)
+            return
+        super().keyReleaseEvent(event)
 
     def _end_keyboard_selection(self):
         self._keyboard_anchor = None
@@ -1624,14 +1665,18 @@ class CaptureEditor(QWidget):
             QApplication.clipboard().setText(value)
             self.color_copied.emit(value)
 
-    def _magnifier_visible(self):
-        return (
-            self.show_magnifier and not self._embedded
-            and self.rect().contains(self.position)
-            and (self.selection.isEmpty() or self.drag_mode in {"region", "resize"})
-        )
+    def _set_magnifying(self, enabled):
+        if self._magnifying != enabled:
+            old_lens = self._visible_magnifier_rect()
+            self._magnifying = enabled
+            lens = self._visible_magnifier_rect()
+            if old_lens != lens:
+                self.update(QRegion(old_lens) | QRegion(lens))
 
-    def _magnifier_rect(self, position):
+    def _visible_magnifier_rect(self):
+        if self._embedded or not self.show_magnifier or not (self.color_only or self._magnifying):
+            return QRect()
+        position = self.position
         if not self.rect().contains(position):
             return QRect()
         width, height = 162, 155
@@ -1643,10 +1688,7 @@ class CaptureEditor(QWidget):
         y = position.y() + 20 if position.y() + height + 20 <= bounds.bottom() else position.y() - height - 20
         return QRect(max(bounds.left(), x), max(bounds.top(), y), width, height)
 
-    def _paint_magnifier(self, painter):
-        lens = self._magnifier_rect(self.position)
-        if lens.isEmpty():
-            return
+    def _paint_magnifier(self, painter, lens):
         source = QRect(self.position - QPoint(7, 5), QSize(15, 11)).intersected(self.rect())
         detail = self.snapshot.crop(source.translated(self.snapshot.geometry.topLeft()))
         if detail.isNull():
@@ -1697,9 +1739,7 @@ class CaptureEditor(QWidget):
                     paint_annotation(painter, image, draft, self._rendered, self.selection.size())
                     painter.restore()
         if not self._embedded or self.crop_mode:
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(ACCENT, 1))
-            painter.drawRect(self.selection.adjusted(0, 0, -1, -1))
+            self._paint_outline(painter, self.selection)
             if self.show_guides and not self.drag_mode:
                 self._paint_handles(painter)
         if self.selected_items:
@@ -1730,56 +1770,64 @@ class CaptureEditor(QWidget):
         ):
             painter.drawRect(QRect(x - 3, y - 3, 6, 6))
 
-    def _paint_hint(self, painter):
-        if self._embedded or not self.selection.isEmpty() or self.drag_mode:
+    @staticmethod
+    def _outline_region(rect):
+        if rect.isEmpty():
+            return QRegion()
+        # Include both sides of the contrast stroke at fractional display scales.
+        return QRegion(rect.adjusted(-3, -3, 3, 3)) - QRegion(rect.adjusted(4, 4, -4, -4))
+
+    @staticmethod
+    def _paint_outline(painter, rect):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if rect.width() >= 4 and rect.height() >= 4:
+            outline = rect.adjusted(1, 1, -2, -2)
+            painter.setPen(QPen(QColor("#101923"), 3))
+            painter.drawRect(outline)
+        else:
+            outline = rect.adjusted(0, 0, -1, -1)
+        painter.setPen(QPen(ACCENT, 1))
+        painter.drawRect(outline)
+        painter.restore()
+
+    def _paint_snapshot(self, painter, damaged):
+        frames = getattr(self.snapshot, "frames", ())
+        if not frames:
+            painter.drawImage(QRectF(self.rect()), self.snapshot.image)
             return
-        hint = self._label(
-            "Drag to select an area  ·  Tab selects a window  ·  Enter copies  ·  Esc cancels",
-            "拖动选择区域  ·  Tab 切换窗口  ·  回车复制  ·  Esc 取消",
-        )
-        if self.color_only:
-            hint = self._label("Click to copy this color  ·  Esc cancels", "单击复制此颜色  ·  Esc 取消")
-        elif not self.windows:
-            hint = self._label("Drag to select an area  ·  Enter copies  ·  Esc cancels", "拖动选择区域  ·  回车复制  ·  Esc 取消")
-        screen = QApplication.screenAt(self.position + self.snapshot.geometry.topLeft())
-        bounds = self._local_rect(screen.geometry()) if screen is not None else self.rect()
-        width = min(bounds.width() - 12, painter.fontMetrics().horizontalAdvance(hint) + 36)
-        if width <= 0:
-            return
-        panel = QRect(bounds.center().x() - width // 2, bounds.top() + 16, width, 34)
-        painter.setPen(QPen(QColor("#8299b6"), 1))
-        painter.setBrush(QColor("#172334"))
-        painter.drawRoundedRect(panel, 8, 8)
-        painter.setPen(QColor("#ffffff"))
-        painter.drawText(panel, Qt.AlignmentFlag.AlignCenter, hint)
+        offset = self.snapshot.geometry.topLeft()
+        for frame in frames:
+            target = frame.geometry.translated(-offset)
+            if damaged.intersects(target):
+                painter.drawImage(QRectF(target), frame.image)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(event.rect(), QColor("#152236"))
-        painter.drawImage(QRectF(self.rect()), self.snapshot.image)
+        self._paint_snapshot(painter, event.region())
         if self.crop_mode and self.document.annotations:
             key = (QRect(self.rect()), self.document.annotations)
             if key != self._render_key:
                 self._rendered = render_annotations(self.snapshot.image, self.document.annotations)
                 self._render_key = key
             painter.drawImage(QRectF(self.rect()), self._rendered)
-        if not self._embedded or self.crop_mode:
-            hovered = self._hover_rect()
-            active = self.selection if not self.selection.isEmpty() else hovered
+        if self.crop_mode:
             dim = QPainterPath()
             dim.addRect(QRectF(self.rect()))
-            if not active.isEmpty():
-                dim.addRect(QRectF(active))
+            if not self.selection.isEmpty():
+                dim.addRect(QRectF(self.selection))
             painter.fillPath(dim, QColor(9, 16, 29, 126))
-            if not hovered.isEmpty() and self.selection.isEmpty():
-                painter.setPen(QPen(ACCENT, 1))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRect(hovered.adjusted(0, 0, -1, -1))
+        elif not self._embedded and self.selection.isEmpty():
+            hovered = self._hover_rect()
+            if not hovered.isEmpty():
+                self._paint_outline(painter, hovered)
         self._paint_selection(painter)
-        self._paint_hint(painter)
-        if self._magnifier_visible():
-            self._paint_magnifier(painter)
+        lens = self._visible_magnifier_rect()
+        if event.region().intersects(lens):
+            self._paint_magnifier(painter, lens)
         painter.end()
 
 

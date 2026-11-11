@@ -1,4 +1,4 @@
-# Snaploom 1.0.0 交付验收
+# Snaploom 交付验收
 
 对照范围为 Snipaste 2.11.3 免费版和专业版。编号与 [调研功能矩阵](snipaste-research.md) 一致。
 
@@ -16,10 +16,19 @@
 
 | 检查 | 运行方式 |
 | --- | --- |
-| 编辑器、存储、坐标和拼接 | `python -m unittest discover -s tests -v` |
+| 编辑器、操作流程、存储、坐标和拼接 | 设置 `QT_QPA_PLATFORM=offscreen` 后执行 `python -m pytest -q` |
 | 界面和离线识别 | `python run_snaploom.py --smoke-test-ocr` |
-| 原生 Windows 或 X11 像素 | 设置 `SNAPLOOM_TEST_DESKTOP=1` 后执行 `python -m unittest discover -s tests -p test_capture.py -v` |
+| 原生 Windows 或 X11 像素 | 在有图形桌面的会话中设置 `SNAPLOOM_TEST_DESKTOP=1`，使用 Windows 或 X11 后端执行 `python -m pytest -q tests/test_capture.py tests/test_native_interactions.py` |
 | 各架构离线安装包 | 在目标系统执行 `python packaging/build.py --smoke`。GitHub Actions 在原生架构运行。 |
+
+## 1.0.1 用户操作回归
+
+| 操作 | 验证结果 |
+| --- | --- |
+| 悬停、贴图、关闭、恢复 | 悬停按钮不访问剪贴板。显式点击可贴出网址文字并用 × 隐藏。菜单随贴图隐藏，超出屏幕的贴图仍能点击 ×，鼠标穿透的贴图可从列表隐藏。覆盖拖放文件、手动恢复后再次贴图和重启恢复。 |
+| 截图与框选 | 覆盖主窗口、托盘、键盘操作、重复选区、活动窗口、自定义尺寸和白板。逐像素检查反向拖选、缩小、移动、调整大小、亮暗画面和 Alt 放大镜。桌面测试读取实际显示的像素，检查旧边框是否清除。 |
+| 标注、输出和取消 | 覆盖标注撤销与重做、复制、快速保存、复制为文件、取消保存后重试、多输出命令、关闭子菜单、截图取消及取图失败后重试。 |
+| 历史、设置、识别与拼接 | 覆盖历史预览、确认清理、快捷键设置与重启、二维码识别与复制、滚动帧不重叠后重试。打包冒烟测试验证离线 OCR。 |
 
 ## 发布包的环境边界
 

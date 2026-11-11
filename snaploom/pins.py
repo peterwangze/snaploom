@@ -7,7 +7,7 @@ from base64 import b64decode
 
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QImage, QMovie, QPainter, QTransform
-from PySide6.QtWidgets import QApplication, QColorDialog, QInputDialog, QMenu, QWidget
+from PySide6.QtWidgets import QApplication, QColorDialog, QInputDialog, QMenu, QToolButton, QWidget
 
 
 class PinWindow(QWidget):
@@ -46,6 +46,21 @@ class PinWindow(QWidget):
         self.timer.timeout.connect(self.changed)
         self.movie = None
         self.movie_buffer = None
+        self.menu = None
+        self.dismiss_button = QToolButton(self, objectName="PinDismiss")
+        self.dismiss_button.setText("×")
+        self.dismiss_button.setAccessibleName(self.tr("Hide pin", "隐藏贴图"))
+        self.dismiss_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.dismiss_button.setCursor(Qt.CursorShape.ArrowCursor)
+        self.dismiss_button.setStyleSheet("""
+            #PinDismiss {
+                background: #1f334d; color: white; border: 1px solid #a7bbd1;
+                border-radius: 5px; padding: 0; font-size: 16px;
+            }
+            #PinDismiss:hover { background: #354d6e; }
+        """)
+        self.dismiss_button.clicked.connect(self.close)
+        self.dismiss_button.hide()
         self.apply_state()
         self.move(self.state["x"], self.state["y"])
         self.load_animation()
@@ -83,9 +98,42 @@ class PinWindow(QWidget):
         super().showEvent(event)
 
     def hideEvent(self, event):
+        if self.menu is not None:
+            self.menu.hide()
+        self.dismiss_button.hide()
+        self.drag_position = self.resize_origin = self.drag_select = None
+        self.selection_rect = QRect()
+        self.right_drag = self.track_pick = False
         if self.movie and self.movie.state() == QMovie.MovieState.Running:
             self.movie.setPaused(True)
         super().hideEvent(event)
+
+    def enterEvent(self, event):
+        if not self.state["click_through"]:
+            self.position_dismiss_button(event.globalPosition().toPoint())
+            self.dismiss_button.show()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.dismiss_button.hide()
+        super().leaveEvent(event)
+
+    def resizeEvent(self, event):
+        self.position_dismiss_button()
+        super().resizeEvent(event)
+
+    def position_dismiss_button(self, pointer=None):
+        visible = self.rect()
+        screen = QGuiApplication.screenAt(QCursor.pos() if pointer is None else pointer)
+        if screen is not None:
+            bounds = screen.availableGeometry()
+            on_screen = visible.intersected(QRect(self.mapFromGlobal(bounds.topLeft()), bounds.size()))
+            if not on_screen.isEmpty():
+                visible = on_screen
+        size = min(24, visible.width(), visible.height())
+        x = max(visible.left(), visible.right() - size - 2)
+        y = min(visible.top() + 3, visible.bottom() - size + 1)
+        self.dismiss_button.setGeometry(x, y, size, size)
 
     def toggle_movie(self, paused):
         self.state["paused"] = paused
@@ -232,6 +280,10 @@ class PinWindow(QWidget):
             self.drag_select = event.position().toPoint()
 
     def mouseMoveEvent(self, event):
+        if self.drag_position is not None and not event.buttons() & Qt.MouseButton.LeftButton:
+            self.drag_position = self.resize_origin = None
+        if self.dismiss_button.isVisible():
+            self.position_dismiss_button(event.globalPosition().toPoint())
         if self.drag_position is not None:
             delta = event.globalPosition().toPoint() - self.drag_position
             if self.resize_origin is None:
@@ -265,7 +317,7 @@ class PinWindow(QWidget):
                 self.set_state("thumbnail", True)
             self.drag_select = None
             self.selection_rect = QRect()
-            QTimer.singleShot(100, self.finish_right_drag)
+            QTimer.singleShot(100, self, self.finish_right_drag)
 
     def finish_right_drag(self):
         self.right_drag = False
@@ -296,6 +348,8 @@ class PinWindow(QWidget):
     def moveEvent(self, event):
         point = event.pos()
         self.state["x"], self.state["y"] = point.x(), point.y()
+        if self.dismiss_button.isVisible():
+            self.position_dismiss_button()
         self.timer.start()
         super().moveEvent(event)
 
@@ -364,16 +418,31 @@ class PinWindow(QWidget):
             self.update()
         super().keyReleaseEvent(event)
 
+    def focusOutEvent(self, event):
+        if self.track_pick:
+            self.track_pick = False
+            self.update()
+        super().focusOutEvent(event)
+
     def closeEvent(self, event):
-        event.ignore()
+        event.accept()
         self.dismissed.emit(False)
 
     def contextMenuEvent(self, event):
-        if self.right_drag:
+        if self.right_drag or self.state["click_through"]:
             return
+        if self.menu is not None:
+            self.menu.hide()
         menu = QMenu(self)
+        self.menu = menu
         self.populate_menu(menu)
-        menu.exec(event.globalPos())
+        menu.aboutToHide.connect(self.dispose_menu)
+        menu.popup(event.globalPos())
+
+    def dispose_menu(self):
+        menu = self.menu
+        self.menu = None
+        menu.deleteLater()
 
     def populate_menu(self, menu):
         entries = (

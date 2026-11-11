@@ -56,7 +56,7 @@ class Application:
         self.locale = "zh-CN" if QLocale.system().language() == QLocale.Language.Chinese else "en"
         self.dashboard = Dashboard(self.tr)
         self.dashboard.setWindowIcon(app_icon())
-        self.dashboard.action.connect(self.action)
+        self.dashboard.action.connect(self.dashboard_action)
         self.dashboard.history_action.connect(self.history_action)
         self.dashboard.pin_action.connect(self.pin_action)
         self.dashboard.files_dropped.connect(self.open_files)
@@ -189,6 +189,20 @@ class Application:
             self.status(self.tr("Some global shortcuts could not be registered.", "部分全局快捷键注册失败。"))
         self.dashboard.shortcuts.setText("   ·   ".join(labels))
 
+    def dashboard_action(self, action):
+        if action == "paste":
+            frame = self.dashboard.frameGeometry()
+            available = self.dashboard.screen().availableGeometry()
+            if available.right() - frame.right() >= 240:
+                position = frame.topRight() + QPoint(16, 0)
+            else:
+                position = self.dashboard.mapToGlobal(QPoint(24, self.dashboard.height() * 2 // 3))
+                position.setX(max(available.left(), min(position.x(), available.right() - 120)))
+                position.setY(max(available.top(), min(position.y(), available.bottom() - 64)))
+            self.paste(position)
+        else:
+            self.action(action)
+
     def action(self, action):
         modes = {
             "capture": {}, "screen": {"active_screen": True}, "full": {"full": True},
@@ -248,7 +262,7 @@ class Application:
                     self.capture_context["pins"].append(pin)
         delay = float(options.get("delay", 0))
         if delay:
-            self.notify(self.tr(f"Capturing in {delay:g} seconds", f"{delay:g} 秒后截图"))
+            self.status(self.tr(f"Capturing in {delay:g} seconds", f"{delay:g} 秒后截图"))
         QTimer.singleShot(max(105, int(delay * 1000)), self.start_capture)
 
     def custom_region(self, whiteboard=False):
@@ -697,6 +711,8 @@ class Application:
         window = self.pin_windows.get(pin_id)
         if window is None:
             return
+        if action in {"show", "delete"} and pin_id in self.closed_pins:
+            self.closed_pins.remove(pin_id)
         if action == "delete":
             window.hide()
             del self.pin_windows[pin_id]
@@ -1377,8 +1393,10 @@ class Application:
         QMessageBox.information(
             self.dashboard, "Snaploom",
             self.tr("F1 captures a region. Enter copies the screenshot. F3 pastes or restores a pin. "
+                    "Hold Alt during capture to magnify. "
                     "Open Settings to customize these shortcuts. The More menu includes offline text and barcode recognition.",
                     "F1 区域截图，回车复制，F3 从剪贴板贴图或恢复贴图。"
+                    "截图时按住 Alt 查看放大镜。"
                     "可在设置中更改快捷键，截图工具栏的「更多」提供离线文字和条码识别。"),
         )
 

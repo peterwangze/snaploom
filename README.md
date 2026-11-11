@@ -12,11 +12,11 @@
 
 ### 发一张一眼能看懂的截图
 
-按 **F1** 拖出选区，用箭头指出问题、用编号排好操作顺序，再用实色遮盖挡住敏感内容。拖动边框或按方向键可以微调选区，标注也可以选中、移动或撤销。按 **Enter** 复制结果，直接粘贴到聊天或文档。需要留档时点「保存」。
+按 **F1** 拖出选区。预览保留原画面亮度，按住 **Alt** 可临时查看放大镜。用箭头指出问题、用编号排好操作顺序，再用实色遮盖挡住敏感内容。拖动边框或按方向键可以微调选区，标注也可以选中、移动或撤销。按 **Enter** 复制结果，直接粘贴到聊天或文档。需要留档时点「保存」。
 
 ### 把参考图留在手边
 
-截图后点「贴图」，或复制一张图、一段文字、一个色值，再按 **F3** 把它变成悬浮窗口。对照设计稿、表格或操作步骤时，可以拖动贴图、用滚轮缩放，或按住 **Ctrl／⌘** 滚动调整不透明度。按 **Shift + F3** 可一键显示或隐藏贴图。贴图可分组，默认在重启后恢复，移到屏幕外也能从托盘找回。
+截图后点「贴图」，或复制一张图、一段文字、一个色值，再按 **F3** 把它变成悬浮窗口。对照设计稿、表格或操作步骤时，可以拖动贴图、用滚轮缩放，或按住 **Ctrl／⌘** 滚动调整不透明度。把鼠标移到贴图上，点 **×** 可隐藏这张贴图。按 **Shift + F3** 可一键显示或隐藏贴图。贴图可分组，默认在重启后恢复，移到屏幕外也能从托盘找回。
 
 ### 从图片里取文字，把长页面拼成一张
 
@@ -67,8 +67,7 @@ python run_snaploom.py ocr ./screen.png --block
 ```sh
 python -m pip install -r requirements.txt
 python run_snaploom.py
-python -m unittest discover -s tests -v
 python run_snaploom.py --smoke-test-ocr
 ```
 
-构建和测试细节见 [打包说明](packaging/README.md)。功能对照、设计取舍和已知差异见 [Snipaste 调研](docs/snipaste-research.md) · [产品设计](docs/product-plan.md) · [交付验收记录](docs/release-verification.md)。
+交互测试以 `QT_QPA_PLATFORM=offscreen` 运行 `python -m pytest -q`，测试依赖见 `packaging/requirements-build.txt`。原生桌面检查和平台边界见 [交付验收记录](docs/release-verification.md)。 [打包说明](packaging/README.md) · [Snipaste 调研](docs/snipaste-research.md) · [产品设计](docs/product-plan.md)
