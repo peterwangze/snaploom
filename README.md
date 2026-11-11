@@ -4,7 +4,25 @@
 
 用 Snaploom 把问题截图发给同事、把示例悬浮在正在操作的窗口旁，或从屏幕上提取可编辑的文字。支持 Windows、macOS 和 Linux，安装包自带运行环境和中英文 OCR 模型。
 
-[下载最新离线版](https://github.com/peterwangze/snaploom/releases/latest) · [选择安装包](#离线安装)
+## 下载 v1.0.3 离线包
+
+### Windows
+
+- **x64（Windows 10 / 11）** · [安装版（EXE）](https://github.com/peterwangze/snaploom/releases/download/v1.0.3/Snaploom-1.0.3-windows-x64-setup.exe) · [免安装版（ZIP）](https://github.com/peterwangze/snaploom/releases/download/v1.0.3/Snaploom-1.0.3-windows-x64-portable.zip)
+
+### macOS 13 及以上
+
+- **Apple Silicon（ARM64）** · [安装版（DMG）](https://github.com/peterwangze/snaploom/releases/download/v1.0.3/Snaploom-1.0.3-macos-arm64.dmg)
+- **Intel（x64）** · [安装版（DMG）](https://github.com/peterwangze/snaploom/releases/download/v1.0.3/Snaploom-1.0.3-macos-x64.dmg)
+
+两种架构均通过 DMG 分发。打开后可将 Snaploom 拖入「应用程序」或所需位置。
+
+### Linux
+
+- **x64（glibc 2.35+）** · [安装版（RUN）](https://github.com/peterwangze/snaploom/releases/download/v1.0.3/Snaploom-1.0.3-linux-x64-setup.run) · [免安装版（TAR.GZ）](https://github.com/peterwangze/snaploom/releases/download/v1.0.3/Snaploom-1.0.3-linux-x64.tar.gz)
+- **ARM64（glibc 2.39+）** · [安装版（RUN）](https://github.com/peterwangze/snaploom/releases/download/v1.0.3/Snaploom-1.0.3-linux-arm64-setup.run) · [免安装版（TAR.GZ）](https://github.com/peterwangze/snaploom/releases/download/v1.0.3/Snaploom-1.0.3-linux-arm64.tar.gz)
+
+[安装说明](#离线安装) · [SHA-256 校验文件](https://github.com/peterwangze/snaploom/releases/download/v1.0.3/SHA256SUMS.txt) · [v1.0.3 发布记录](https://github.com/peterwangze/snaploom/releases/tag/v1.0.3)
 
 ![Snaploom 的截图编辑器，选区中有编号和箭头，工具栏提供复制、贴图和保存。](docs/images/capture-editor.png)
 
@@ -33,17 +51,11 @@
 
 ## 离线安装
 
-登录有仓库权限的 GitHub 账号后，按系统和处理器选择文件。发布页随包提供 SHA-256 校验文件。
+- **Windows** 运行 EXE 安装，或解压 ZIP 后运行 `Snaploom.exe`。安装包未签名。
+- **macOS** 打开对应架构的 DMG 后拖出 Snaploom。应用使用临时签名，尚未公证，截图需要屏幕录制权限。
+- **Linux** 在普通用户的终端执行 `sh Snaploom-1.0.3-linux-架构-setup.run` 安装，或解压 TAR.GZ 后运行 `Snaploom/Snaploom`。需要图形桌面及系统图形库。Wayland 上的截图和全局快捷键取决于系统门户。
 
-| 系统 | 安装包 | 便携包 |
-| --- | --- | --- |
-| Windows 10/11 x64 | `*-windows-x64-setup.exe` | `*-windows-x64-portable.zip` |
-| macOS 13+ Apple Silicon | `*-macos-arm64.dmg` | DMG 内的应用可拖到所需位置 |
-| macOS 13+ Intel | `*-macos-x64.dmg` | DMG 内的应用可拖到所需位置 |
-| Linux x64，glibc 2.35+ | `*-linux-x64-setup.run` | `*-linux-x64.tar.gz` |
-| Linux ARM64，glibc 2.39+ | `*-linux-arm64-setup.run` | `*-linux-arm64.tar.gz` |
-
-Windows 安装包未签名。macOS 使用临时签名，尚未公证，截图需要屏幕录制权限。Linux 在普通用户的终端执行 `sh Snaploom-版本-linux-架构-setup.run`，需要图形桌面及系统图形库。Wayland 上的截图和全局快捷键取决于系统门户。 [首次启动说明](https://github.com/peterwangze/snaploom/releases/latest) · [平台兼容性与验收记录](docs/release-verification.md)
+[首次启动说明](https://github.com/peterwangze/snaploom/releases/tag/v1.0.3) · [平台兼容性与验收记录](docs/release-verification.md)
 
 ## 进阶用法
 
