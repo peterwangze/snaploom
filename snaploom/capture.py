@@ -161,6 +161,14 @@ def _normalized_image(image: QImage) -> QImage:
     return image
 
 
+def disable_capture_window_transitions(widget) -> None:
+    """Keep the compositor from drawing a fading copy after a capture window hides."""
+    if QGuiApplication.platformName() == "windows":
+        from .capture_win import disable_window_transitions
+
+        disable_window_transitions(int(widget.winId()))
+
+
 def capture_desktop(include_cursor: bool = False) -> Snapshot:
     """Capture connected displays before the selection overlay is shown."""
     screens = QGuiApplication.screens()

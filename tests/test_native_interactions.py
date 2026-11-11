@@ -1,4 +1,4 @@
-"""Read back the actual desktop surface after a selection shrinks."""
+"""Verify capture editor interactions on the live desktop."""
 
 import os
 import unittest
@@ -14,6 +14,39 @@ from snaploom.editor import CaptureEditor
 
 @unittest.skipUnless(os.environ.get("SNAPLOOM_TEST_DESKTOP") == "1", "needs a live test desktop")
 class DesktopSelectionTests(unittest.TestCase):
+    def test_toolbar_uses_normal_pointer_on_the_desktop(self):
+        app = QApplication.instance() or QApplication([])
+        available = app.primaryScreen().availableGeometry()
+        geometry = QRect(QPoint(), QSize(760, 520).boundedTo(available.size()))
+        geometry.moveCenter(available.center())
+        source = QImage(geometry.size(), QImage.Format.Format_RGB32)
+        source.fill(Qt.GlobalColor.white)
+        selection = QRect(geometry.topLeft() + QPoint(24, 40), QSize(245, 178))
+        editor = CaptureEditor(Snapshot(source, geometry), selection=selection)
+        arrow, text, cross = Qt.CursorShape.ArrowCursor, Qt.CursorShape.IBeamCursor, Qt.CursorShape.CrossCursor
+
+        def assert_desktop_cursor(widget, expected, point=None):
+            position = widget.mapToGlobal(widget.rect().center() if point is None else point)
+            window = widget.window()
+            local = window.mapFromGlobal(position)
+            handle = window.windowHandle()
+            QTest.mouseMove(handle, local)
+            hit = window.childAt(local) or window
+            self.assertIs(hit, widget)
+            self.assertEqual(handle.cursor().shape(), expected)
+
+        try:
+            editor.show()
+            self.assertTrue(QTest.qWaitForWindowExposed(editor, 2000))
+            canvas_point = QPoint(100, 90)
+            assert_desktop_cursor(editor, cross, canvas_point)
+            assert_desktop_cursor(editor.toolbar, arrow, QPoint(4, 4))
+            assert_desktop_cursor(editor.tool_buttons["pen"], arrow)
+            assert_desktop_cursor(editor.stroke_width.lineEdit(), text)
+            assert_desktop_cursor(editor, cross, canvas_point)
+        finally:
+            editor.close()
+
     def test_editor_accepts_width_input_and_undoes_one_change_on_the_desktop(self):
         app = QApplication.instance() or QApplication([])
         available = app.primaryScreen().availableGeometry()

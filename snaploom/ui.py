@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from .capture import disable_capture_window_transitions
 from .hotkeys import LABELS
 
 
@@ -182,6 +183,10 @@ class Dashboard(QWidget):
             item.setSelected(pin_id in selected)
         if self.pin_list.count() and not self.pin_list.selectedItems():
             self.pin_list.setCurrentRow(0)
+
+    def showEvent(self, event):
+        disable_capture_window_transitions(self)
+        super().showEvent(event)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():

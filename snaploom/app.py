@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import VERSION
+from .capture import disable_capture_window_transitions
 from .commands import CommandServer, arguments, send_to_instance
 from .hotkeys import Hotkeys
 from .imaging import clipboard_images, parse_color, read_image, recognize, shadowed, stitch_images, text_image
@@ -258,6 +259,7 @@ class Application:
         if self.workspace.get("hide_pins_on_capture"):
             for pin in self.pin_windows.values():
                 if pin.isVisible():
+                    disable_capture_window_transitions(pin)
                     pin.hide()
                     self.capture_context["pins"].append(pin)
         delay = float(options.get("delay", 0))
@@ -291,6 +293,7 @@ class Application:
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addRow(buttons)
+        disable_capture_window_transitions(dialog)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         rect = [field.value() for field in fields]
@@ -1172,6 +1175,7 @@ class Application:
         dialog.move(display.availableGeometry().topLeft() + QPoint(8, 8))
 
         def next_frame():
+            disable_capture_window_transitions(dialog)
             dialog.hide()
 
             def grab():

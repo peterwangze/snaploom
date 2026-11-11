@@ -91,6 +91,15 @@ _get_active = _bind(_user, "GetForegroundWindow", W.HWND)
 _screen_to_client = _bind(_user, "ScreenToClient", W.BOOL, W.HWND, C.POINTER(W.POINT))
 _child_from_point = _bind(_user, "ChildWindowFromPointEx", W.HWND, W.HWND, W.POINT, W.UINT)
 _dwm_attr = _bind(_dwm, "DwmGetWindowAttribute", W.LONG, W.HWND, W.DWORD, C.c_void_p, W.DWORD)
+_dwm_set_attr = _bind(_dwm, "DwmSetWindowAttribute", W.LONG, W.HWND, W.DWORD, C.c_void_p, W.DWORD)
+_dwm_flush = _bind(_dwm, "DwmFlush", W.LONG)
+
+DWMWA_TRANSITIONS_FORCEDISABLED = 3
+
+
+def disable_window_transitions(hwnd: int) -> None:
+    disabled = W.BOOL(True)
+    _dwm_set_attr(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, C.byref(disabled), C.sizeof(disabled))
 
 
 def _qt_rect(rect: W.RECT) -> QRect:
@@ -208,6 +217,8 @@ def _capture_display(desktop, rect: QRect, cursor) -> QImage:
 
 
 def capture_frames(screens, include_cursor: bool) -> tuple[ScreenFrame, ...]:
+    # Let DWM present our pending window changes before copying its desktop image.
+    _dwm_flush()
     desktop = _get_dc(None)
     if not desktop:
         raise CaptureError("Windows 无法访问桌面画面。")

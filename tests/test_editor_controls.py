@@ -46,6 +46,16 @@ class EditorControlTests(unittest.TestCase):
         QTest.mouseClick(window.windowHandle(), Qt.MouseButton.LeftButton, pos=window.mapFromGlobal(desktop_point))
         self.qt.processEvents()
 
+    def assert_cursor_at(self, widget, cursor, position=None):
+        point = widget.rect().center() if position is None else position
+        desktop_point = widget.mapToGlobal(point)
+        window = widget.window()
+        QTest.mouseMove(window.windowHandle(), window.mapFromGlobal(desktop_point))
+        self.qt.processEvents()
+        hit = self.qt.widgetAt(desktop_point)
+        self.assertIs(hit, widget)
+        self.assertEqual(hit.cursor().shape(), cursor)
+
     def drag(self, editor, start, end):
         window = editor.window()
         handle = window.windowHandle()
@@ -79,6 +89,30 @@ class EditorControlTests(unittest.TestCase):
         point = view.visualRect(index).intersected(view.viewport().rect()).center()
         self.click(view.viewport(), point)
         self.assertEqual(combo.currentData(), style)
+
+    def test_cursor_switches_between_canvas_toolbar_and_annotation_controls(self):
+        cross = Qt.CursorShape.CrossCursor
+        arrow = Qt.CursorShape.ArrowCursor
+        text = Qt.CursorShape.IBeamCursor
+        for bounds in (None, QRect(0, 0, 220, 145)):
+            with self.subTest(floating=bounds is not None):
+                editor = self.open_editor(bounds)
+                self.assertEqual(editor.toolbar.isWindow(), bounds is not None)
+                canvas_point = QPoint(100, 80)
+                self.assert_cursor_at(editor, cross, canvas_point)
+                self.assert_cursor_at(editor.toolbar, arrow, QPoint(4, 4))
+                self.assert_cursor_at(editor.tool_buttons["arrow"], arrow)
+                self.click(editor.tool_buttons["arrow"])
+                self.assert_cursor_at(editor.stroke_width.lineEdit(), text)
+                self.assert_cursor_at(editor.style, arrow)
+                self.click(editor.style)
+                view = editor.style.view()
+                self.assertTrue(view.isVisible())
+                self.assert_cursor_at(view.viewport(), arrow)
+                editor.style.hidePopup()
+                self.assertFalse(view.isVisible())
+                self.assert_cursor_at(editor, cross, canvas_point)
+                editor.close()
 
     def test_line_width_buttons_and_typing_keep_capture_open_and_affect_pixels(self):
         editor = self.open_editor()
@@ -284,7 +318,10 @@ class EditorControlTests(unittest.TestCase):
         dialog.applied.connect(applied.append)
         dialog.show()
         self.qt.processEvents()
+        self.assert_cursor_at(dialog.canvas, Qt.CursorShape.CrossCursor)
+        self.assert_cursor_at(dialog.canvas.tool_buttons["pen"], Qt.CursorShape.ArrowCursor)
         self.click(dialog.canvas.tool_buttons["pen"])
+        self.assert_cursor_at(dialog.canvas.stroke_width.lineEdit(), Qt.CursorShape.IBeamCursor)
         self.type_number(dialog.canvas.stroke_width, 12)
         self.assertEqual(dialog.canvas.stroke_width.value(), 12)
         self.assertTrue(dialog.isVisible())

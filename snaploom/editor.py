@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
+from .capture import disable_capture_window_transitions
+
 
 TOOLS = (
     ("select", "Select and move", "选取和移动", "V"),
@@ -622,6 +624,7 @@ class CaptureEditor(QWidget):
         self.toolbar = toolbar
         toolbar.setObjectName("captureToolbar")
         toolbar.setAccessibleName(self._label("Capture toolbar", "截图工具栏"))
+        toolbar.setCursor(Qt.CursorShape.ArrowCursor)
         toolbar.setStyleSheet(
             "QFrame#captureToolbar { background: #172334; color: #f4f7fc; border: 1px solid #52647b; border-radius: 11px; }"
             "QToolButton { color: #f4f7fc; background: transparent; border: 1px solid transparent; border-radius: 5px;"
@@ -803,6 +806,8 @@ class CaptureEditor(QWidget):
                 Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
                 if floating else Qt.WindowType.Widget
             )
+            if floating:
+                disable_capture_window_transitions(self.toolbar)
             for shortcut in self._floating_shortcuts:
                 shortcut.setEnabled(floating)
         self.toolbar.resize(self.toolbar.sizeHint())
@@ -889,6 +894,8 @@ class CaptureEditor(QWidget):
         super().closeEvent(event)
 
     def showEvent(self, event):
+        if not self._embedded:
+            disable_capture_window_transitions(self)
         super().showEvent(event)
         self.position = self.mapFromGlobal(QCursor.pos())
         self._update_hover()

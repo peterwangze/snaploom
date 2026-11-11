@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
 from snaploom.capture import ScreenFrame, Snapshot, _composite, capture_desktop
 
@@ -52,6 +54,77 @@ class ScreenCoordinateTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("SNAPLOOM_TEST_DESKTOP") == "1", "needs a live test desktop")
 class NativeDesktopTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "requires Windows desktop composition")
+    def test_region_button_captures_the_background_without_dashboard_ghosting(self):
+        from snaploom.app import Application
+
+        qt = QApplication.instance() or QApplication([])
+        available = qt.primaryScreen().availableGeometry()
+        background = QWidget(None, Qt.WindowType.FramelessWindowHint)
+        background.setGeometry(available.adjusted(12, 12, -12, -12))
+        background.setStyleSheet("background: #254a6b")
+        with TemporaryDirectory() as directory:
+            app = Application(qt, Path(directory), testing=True)
+            dashboard = app.dashboard
+            dashboard.move(available.center() - QPoint(dashboard.width() // 2, dashboard.height() // 2))
+            button = next(button for button in dashboard.findChildren(QPushButton)
+                          if button.text() in {"Capture region", "区域截图"})
+            try:
+                background.show()
+                background.raise_()
+                self.assertTrue(QTest.qWaitForWindowExposed(background, 2000))
+                probe = QRect(available.center() - QPoint(120, 80), QSize(240, 160))
+                expected = QColor("#254a6b")
+                for _ in range(10):
+                    QTest.qWait(30)
+                    if capture_desktop().color_at(probe.center()) == expected:
+                        break
+                clean = capture_desktop().crop(probe)
+                self.assertEqual(clean.pixelColor(clean.rect().center()), expected)
+
+                for _ in range(3):
+                    app.show_dashboard()
+                    self.assertTrue(QTest.qWaitForWindowExposed(dashboard, 2000))
+                    QTest.qWait(250)
+                    self.assertNotEqual(capture_desktop().crop(probe), clean)
+                    window = dashboard.windowHandle()
+                    QTest.mouseClick(window, Qt.MouseButton.LeftButton,
+                                     pos=dashboard.mapFromGlobal(button.mapToGlobal(button.rect().center())))
+                    self.assertFalse(dashboard.isVisible())
+                    for _ in range(80):
+                        QTest.qWait(25)
+                        if app.editor is not None:
+                            break
+                    self.assertIsNotNone(app.editor)
+                    editor = app.editor
+                    self.assertEqual(editor.snapshot.crop(probe), clean, "Dashboard pixels remained in the capture")
+                    self.assertTrue(QTest.qWaitForWindowExposed(editor, 2000))
+                    window = editor.windowHandle()
+                    start = editor.mapFromGlobal(probe.topLeft() + QPoint(22, 22))
+                    end = editor.mapFromGlobal(probe.bottomRight() - QPoint(22, 22))
+                    QTest.mousePress(window, Qt.MouseButton.LeftButton, pos=start)
+                    QTest.mouseMove(window, end)
+                    QTest.mouseRelease(window, Qt.MouseButton.LeftButton, pos=end)
+                    self.assertTrue(editor.toolbar.isVisible())
+                    initial = editor.snapshot
+                    QTest.keyClick(window, Qt.Key.Key_F5)
+                    self.assertFalse(editor.isVisible())
+                    for _ in range(80):
+                        QTest.qWait(25)
+                        if editor.isVisible():
+                            break
+                    self.assertTrue(editor.isVisible())
+                    self.assertIsNot(editor.snapshot, initial)
+                    self.assertEqual(editor.snapshot.crop(probe), clean, "Editor pixels remained after refreshing")
+                    QTest.keyClick(window, Qt.Key.Key_Escape)
+                    self.assertIsNone(app.editor)
+                    self.assertTrue(dashboard.isVisible())
+            finally:
+                app.release_capture(restore_dashboard=False)
+                dashboard.hide()
+                background.close()
+                app.shutdown()
+
     def test_capture_reads_a_known_desktop_color_and_native_dimensions(self):
         app = QApplication.instance() or QApplication([])
         screen = app.primaryScreen()
