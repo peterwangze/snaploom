@@ -35,6 +35,7 @@ class PinWindow(QWidget):
         self.drag_select = None
         self.selection_rect = QRect()
         self.right_drag = False
+        self.snap_targets = lambda: ()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -236,7 +237,10 @@ class PinWindow(QWidget):
             if self.resize_origin is None:
                 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                     delta = QPoint(delta.x(), 0) if abs(delta.x()) >= abs(delta.y()) else QPoint(0, delta.y())
-                self.move(self.drag_origin + delta)
+                position = self.drag_origin + delta
+                if not event.modifiers() & Qt.KeyboardModifier.AltModifier:
+                    position = self.snapped_position(position)
+                self.move(position)
             else:
                 native_width = max(1, self.display_image().width() / self.view.devicePixelRatio())
                 self.zoom(self.resize_origin + delta.x() / native_width)
@@ -266,6 +270,28 @@ class PinWindow(QWidget):
     def finish_right_drag(self):
         self.right_drag = False
         self.update()
+
+    def snapped_position(self, position):
+        moving = QRect(position, self.size())
+        xs, ys = [], []
+        screen = QGuiApplication.screenAt(moving.center())
+        if screen:
+            bounds = screen.availableGeometry()
+            xs.extend((bounds.left(), bounds.right() + 1 - moving.width()))
+            ys.extend((bounds.top(), bounds.bottom() + 1 - moving.height()))
+        for target in self.snap_targets():
+            if target.bottom() + 8 >= moving.top() and moving.bottom() + 8 >= target.top():
+                xs.extend((target.left(), target.right() + 1, target.left() - moving.width(),
+                           target.right() + 1 - moving.width()))
+            if target.right() + 8 >= moving.left() and moving.right() + 8 >= target.left():
+                ys.extend((target.top(), target.bottom() + 1, target.top() - moving.height(),
+                           target.bottom() + 1 - moving.height()))
+
+        def closest(value, candidates):
+            nearest = min(candidates, key=lambda candidate: abs(candidate - value), default=value)
+            return nearest if abs(nearest - value) <= 8 else value
+
+        return QPoint(closest(position.x(), xs), closest(position.y(), ys))
 
     def moveEvent(self, event):
         point = event.pos()
@@ -365,9 +391,9 @@ class PinWindow(QWidget):
         if self.state.get("color_card"):
             menu.addAction(self.tr("Edit color…", "编辑色值…"), lambda: self.action_requested.emit("edit-color"))
         if self.movie:
-            paused = view_action = QAction(self.tr("Pause animation", "暂停动画"), menu,
-                                            checkable=True, checked=self.state.get("paused", False))
-            view_action.toggled.connect(self.toggle_movie)
+            paused = QAction(self.tr("Pause animation", "暂停动画"), menu,
+                             checkable=True, checked=self.state.get("paused", False))
+            paused.toggled.connect(self.toggle_movie)
             menu.addAction(paused)
         menu.addSeparator()
         view = menu.addMenu(self.tr("Appearance", "外观"))

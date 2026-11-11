@@ -6,10 +6,10 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton,
     QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -27,6 +27,7 @@ class Dashboard(QWidget):
     history_action = Signal(str, int)
     pin_action = Signal(str, int)
     files_dropped = Signal(list)
+    closing = Signal()
 
     def __init__(self, translate):
         super().__init__()
@@ -62,8 +63,11 @@ class Dashboard(QWidget):
         ], self.history_action)
         pins_page = self.list_page(self.pin_list, [
             ("show", "Show", "显示"), ("hide", "Hide", "隐藏"), ("recover", "Recover off-screen", "找回屏幕外贴图"),
-            ("group", "Group…", "分组…"), ("solo", "Solo", "仅显示选中贴图"), ("delete", "Delete", "删除"),
+            ("group", "Move…", "移动…"), ("solo", "Solo", "独显"), ("delete", "Delete", "删除"),
         ], self.pin_action)
+        manager = QPushButton(self.tr("Manage groups…", "管理分组…"))
+        manager.clicked.connect(lambda: self.action.emit("manage-groups"))
+        pins_page.layout().insertWidget(0, manager, alignment=Qt.AlignmentFlag.AlignRight)
         self.pin_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.tabs.addTab(history_page, self.tr("History", "历史"))
         self.tabs.addTab(pins_page, self.tr("Pins", "贴图"))
@@ -186,6 +190,10 @@ class Dashboard(QWidget):
             self.files_dropped.emit(files)
             event.acceptProposedAction()
 
+    def closeEvent(self, event):
+        super().closeEvent(event)
+        self.closing.emit()
+
 
 class Preferences(QDialog):
     def __init__(self, workspace, translate, parent):
@@ -211,6 +219,8 @@ class Preferences(QDialog):
             ("start_hidden", "Start in the tray", "启动后收起到托盘"),
             ("allow_remote_images", "Fetch images from clipboard URLs", "允许下载剪贴板网址中的图像"),
             ("show_grid", "Show selection guides", "显示选区参考线"),
+            ("show_magnifier", "Show the magnifier before selection", "选区前显示放大镜"),
+            ("detect_windows", "Suggest windows and controls under the cursor", "识别指针下的窗口和控件"),
         ):
             box = QCheckBox(self.tr(en, zh))
             box.setChecked(workspace.get(key))
@@ -240,6 +250,24 @@ class Preferences(QDialog):
         pattern.setToolTip("Python strftime, %title%, %width%, %height%")
         output_form.addRow(self.tr("Filename pattern", "文件名模板"), pattern)
         self.fields["save_pattern"] = pattern
+        corner = QSpinBox()
+        corner.setRange(0, 1024)
+        corner.setValue(workspace.get("rounded_corners"))
+        output_form.addRow(self.tr("Corner radius (logical pixels)", "截图圆角（逻辑像素）"), corner)
+        self.fields["rounded_corners"] = corner
+        shadow = QCheckBox(self.tr("Add a drop shadow around screenshots", "为截图添加阴影"))
+        shadow.setChecked(workspace.get("capture_shadow"))
+        output_form.addRow(shadow)
+        self.fields["capture_shadow"] = shadow
+        provider = QComboBox()
+        provider.addItem(self.tr("On this device", "在本机识别"), "local")
+        provider.addItem("OCR.space", "ocr-space")
+        provider.addItem(self.tr("Tencent Cloud", "腾讯云"), "tencent")
+        provider.setCurrentIndex(max(0, provider.findData(workspace.get("ocr_provider"))))
+        provider.setToolTip(self.tr("Cloud providers receive the image you submit for recognition.",
+                                    "云端服务会收到你提交识别的图像。"))
+        output_form.addRow(self.tr("Text recognition provider", "文字识别服务"), provider)
+        self.fields["ocr_provider"] = provider
         for key, en, zh, values in (
             ("format", "Image format", "图像格式", ("png", "jpg", "webp", "bmp")),
             ("color_format", "Color picker format", "取色格式", ("HEX", "RGB", "HSL", "HSV", "CMYK")),
@@ -281,6 +309,22 @@ class Preferences(QDialog):
         ))
         self.commands.setPlaceholderText(self.tr("Open in editor = my-editor {image}", "在编辑器打开 = my-editor {image}"))
         command_layout.addWidget(self.commands, 1)
+        editor = QWidget()
+        editor_layout = QVBoxLayout(editor)
+        tabs.addTab(editor, self.tr("Editor keys", "编辑器快捷键"))
+        editor_help = QLabel(self.tr(
+            "Enter one action = key per line. Example: rectangle = R. "
+            "Actions include copy, save, pin, quick-save, refresh, pen, arrow, rectangle, text, mosaic and blur.",
+            "每行填写一项「动作 = 按键」，例如 rectangle = R。"
+            "可配置 copy、save、pin、quick-save、refresh、pen、arrow、rectangle、text、mosaic、blur 等动作。",
+        ))
+        editor_help.setWordWrap(True)
+        editor_layout.addWidget(editor_help)
+        self.editor_shortcuts = QPlainTextEdit()
+        self.editor_shortcuts.setPlainText("\n".join(
+            f"{name} = {shortcut}" for name, shortcut in workspace.get("editor_shortcuts").items()
+        ))
+        editor_layout.addWidget(self.editor_shortcuts, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -300,13 +344,34 @@ class Preferences(QDialog):
             elif isinstance(widget, QSpinBox):
                 data[key] = widget.value()
             elif isinstance(widget, QComboBox):
-                data[key] = widget.currentText()
+                data[key] = widget.currentData() if key == "ocr_provider" else widget.currentText()
             else:
                 data[key] = widget.text().strip()
         data["hotkeys"] = {key: field.text().strip() for key, field in self.shortcuts.items()}
-        data["custom_commands"] = {}
-        for line in self.commands.toPlainText().splitlines():
-            name, separator, command = line.partition("=")
-            if separator and name.strip() and command.strip():
-                data["custom_commands"][name.strip()] = command.strip()
+        for key, field in (("custom_commands", self.commands), ("editor_shortcuts", self.editor_shortcuts)):
+            entries = {}
+            for line in field.toPlainText().splitlines():
+                name, separator, value = line.partition("=")
+                if separator and name.strip() and (value.strip() or key == "editor_shortcuts"):
+                    entries[name.strip()] = value.strip()
+            data[key] = entries
         return data
+
+    def accept(self):
+        from .editor import DEFAULT_EDITOR_SHORTCUTS
+
+        updates = self.values()["editor_shortcuts"]
+        keys = DEFAULT_EDITOR_SHORTCUTS | updates
+        used = {}
+        for action, value in keys.items():
+            if not value:
+                continue
+            sequence = QKeySequence.fromString(value, QKeySequence.SequenceFormat.PortableText)
+            normalized = sequence.toString(QKeySequence.SequenceFormat.PortableText)
+            if not normalized or sequence.count() != 1 or normalized in used:
+                QMessageBox.warning(self, self.tr("Editor shortcuts", "编辑器快捷键"),
+                                    self.tr(f"Invalid or duplicate shortcut for {action}: {value}",
+                                            f"{action} 的快捷键无效或重复：{value}"))
+                return
+            used[normalized] = action
+        super().accept()

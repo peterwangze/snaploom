@@ -24,6 +24,8 @@ Linux 安装可在普通用户的终端执行 `sh Snaploom-版本-linux-架构-s
 - **识别与长截图**。截图工具栏的「更多」提供离线 OCR、二维码和条码识别。滚动截图逐帧采集并匹配重叠部分，找不到足够重叠时可缩短滚动距离重试。
 - **本地数据**。在设置中把历史条数改成 0 即可禁用历史并清理已有条目。贴图单独保存在本地。自动保存和下载剪贴板网址图像默认关闭。
 
+在「设置 → 输出」选择云端 OCR 后，主动发起识别会向所选服务发送这次的图像。OCR.space 从环境变量 `SNAPLOOM_OCR_SPACE_KEY` 读取凭据。腾讯云读取 `TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY` 和可选的 `TENCENTCLOUD_REGION`。本机识别无需凭据。
+
 ## 命令行
 
 Windows 用 `Snaploom-cli.exe`，macOS 用应用包的 `Contents/MacOS/Snaploom`，Linux 用包内的 `Snaploom`。从源码执行 `python run_snaploom.py` 也使用相同的参数。

@@ -16,22 +16,22 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QLocale, QLockFile, QMimeData, QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QByteArray, QLocale, QLockFile, QMimeData, QObject, QPoint, QProcess, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QCursor, QIcon, QImage
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QInputDialog, QLabel, QMenu, QMessageBox, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
+    QInputDialog, QLabel, QListWidget, QMenu, QMessageBox, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
     QTextEdit, QVBoxLayout,
 )
 
 from . import VERSION
 from .commands import CommandServer, arguments, send_to_instance
 from .hotkeys import Hotkeys
-from .imaging import clipboard_images, parse_color, read_image, recognize, stitch_images, text_image
+from .imaging import clipboard_images, parse_color, read_image, recognize, shadowed, stitch_images, text_image
 from .pins import PinWindow
 from .storage import Workspace, data_directory, pictures_directory, png_bytes, save_image
-from .ui import Dashboard, HOTKEY_ZH, Preferences
+from .ui import Dashboard, Preferences
 
 
 class Signals(QObject):
@@ -60,6 +60,7 @@ class Application:
         self.dashboard.history_action.connect(self.history_action)
         self.dashboard.pin_action.connect(self.pin_action)
         self.dashboard.files_dropped.connect(self.open_files)
+        self.dashboard.closing.connect(self.close_dashboard)
         self.editor = None
         self.capturing = False
         self.capture_context = {}
@@ -127,6 +128,10 @@ class Application:
         self.dashboard.raise_()
         self.dashboard.activateWindow()
 
+    def close_dashboard(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self.qt.quit()
+
     def tray_clicked(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.action("capture")
@@ -154,6 +159,7 @@ class Application:
             item.triggered.connect(lambda checked=False, selected=name: self.switch_group(selected))
         groups.addSeparator()
         groups.addAction(self.tr("New group…", "新建分组…"), self.create_group)
+        groups.addAction(self.tr("Manage groups…", "管理分组…"), self.manage_groups)
         for action, en, zh in (
             ("toggle_pins", "Show or hide pins", "显示或隐藏贴图"),
             ("recover", "Recover off-screen pins", "找回屏幕外贴图"),
@@ -203,6 +209,8 @@ class Application:
             self.toggle_click_through()
         elif action == "recover":
             self.recover_pins()
+        elif action == "manage-groups":
+            self.manage_groups()
         elif action == "dashboard":
             self.show_dashboard()
         elif action == "history":
@@ -280,7 +288,7 @@ class Application:
         options = context["options"]
         try:
             from .capture import Snapshot, active_window, capture_desktop, detect_elements, detect_windows
-            from .editor import CaptureEditor
+            from .editor import CaptureEditor, render_annotations
 
             if options.get("active_window"):
                 target = active_window()
@@ -302,21 +310,28 @@ class Application:
                 selection = self.capture_selection(options, snapshot.geometry)
             if selection is not None and selection.isEmpty():
                 raise ValueError(self.tr("The requested region is outside the desktop.", "请求的区域不在桌面范围内。"))
+            radius = options.get("corner_radius") or self.workspace.get("rounded_corners")
             if selection is not None and options.get("output") and not options.get("hold"):
                 image = snapshot.crop(selection)
+                if radius and not image.isNull():
+                    image = render_annotations(image, (), corner_radius=radius, logical_size=selection.size())
                 self.capture_completed("output", image, selection)
                 return
+            suggest_windows = self.workspace.get("detect_windows") and not options.get("whiteboard")
             editor_options = {
                 "locale": self.locale, "show_guides": self.workspace.get("show_grid"),
+                "show_magnifier": self.workspace.get("show_magnifier"),
+                "auto_detect": suggest_windows,
                 "color_format": self.workspace.get("color_format").lower(),
-                "corner_radius": options.get("corner_radius", 0),
+                "corner_radius": radius,
                 "custom_outputs": {name: name for name in self.workspace.get("custom_commands")},
                 "default_action": "output" if options.get("output") else "copy",
                 "aspect_ratio": (tuple(options["size"]) if options.get("size") and options.get("keep_aspect_ratio") else None),
-                "detect_elements": None if options.get("whiteboard") else detect_elements,
+                "detect_elements": detect_elements if suggest_windows else None,
                 "color_only": options.get("color_only", False),
+                "shortcuts": self.workspace.get("editor_shortcuts"),
             }
-            windows = () if options.get("whiteboard") else detect_windows()
+            windows = detect_windows() if suggest_windows else ()
             self.editor = CaptureEditor(snapshot, selection=selection, windows=windows, options=editor_options,
                                         history=self.workspace.regions())
             self.editor.completed.connect(self.capture_completed)
@@ -401,6 +416,15 @@ class Application:
                 context["done"](code=0, text=value)
 
     def capture_completed(self, action, image, rect):
+        options = self.capture_context.get("options", {})
+        shadow = options.get("shadow")
+        if shadow is None:
+            shadow = self.workspace.get("capture_shadow")
+        if shadow and not image.isNull() and action not in {"ocr", "barcode", "scroll"}:
+            try:
+                image = shadowed(image)
+            except (ValueError, RuntimeError) as error:
+                self.notify(str(error), error=True)
         if action == "save" and not self.capture_context.get("options", {}).get("hold"):
             editor = self.editor
             if editor:
@@ -418,7 +442,7 @@ class Application:
                 self.last_region = QRect(rect)
                 self.output(image, "saved", rect, context.get("done"), target)
                 return
-        context = self.release_capture()
+        context = self.release_capture(restore_dashboard=action != "scroll")
         options = context.get("options", {})
         done = context.get("done")
         if image.isNull():
@@ -435,7 +459,7 @@ class Application:
         if action == "output":
             action = "copy"
         if action == "scroll":
-            self.scroll_capture(image, rect, done)
+            self.scroll_capture(image, rect, done, restore_dashboard=context.get("dashboard", False))
             return
         self.output(image, action, rect, done)
 
@@ -516,11 +540,11 @@ class Application:
                 else:
                     execute(index + 1, text)
 
-            self.output(image, action, None, following, target, silent=silent)
+            self.output(image, action, rect, following, target, silent=silent, record=False)
 
         execute(0)
 
-    def output(self, image, action, rect=None, done=None, target=None, *, silent=False):
+    def output(self, image, action, rect=None, done=None, target=None, *, silent=False, record=True):
         rect = QRect(rect) if rect is not None else QRect()
         text = ""
         try:
@@ -568,9 +592,9 @@ class Application:
                     self.notify(self.tr(f"Saved to {target}", f"已保存至 {target}"))
                 if self.workspace.get("copy_after_save"):
                     self.copy_image(image)
-            elif self.workspace.get("auto_save") and rect.isValid():
+            elif record and action != "copy-file" and self.workspace.get("auto_save") and rect.isValid():
                 self.quick_save(image)
-            if rect.isValid():
+            if record and rect.isValid():
                 self.workspace.remember(image, rect, action)
                 self.update_lists()
         except (OSError, RuntimeError, ValueError) as error:
@@ -642,6 +666,8 @@ class Application:
         if not pin_id:
             pin_id = self.workspace.add_pin(image, state)
         window = PinWindow(image, state, self.tr)
+        window.snap_targets = lambda: [other.frameGeometry() for other in self.pin_windows.values()
+                                       if other is not window and other.isVisible()]
         self.pin_windows[pin_id] = window
         window.changed.connect(lambda: self.save_pin(pin_id))
         window.dismissed.connect(lambda destroy: self.pin_action("delete" if destroy else "hide", pin_id))
@@ -706,7 +732,7 @@ class Application:
 
             annotations = tuple(Annotation(**(item | {"points": tuple(map(tuple, item["points"]))}))
                                 for item in window.state.get("annotations", []))
-            dialog = ImageEditor(window.image, parent=None, locale=self.locale, annotations=annotations)
+            dialog = ImageEditor(window.image, parent=window, locale=self.locale, annotations=annotations)
             if action == "crop" and hasattr(dialog, "activate_crop"):
                 dialog.activate_crop()
             dialog.applied.connect(lambda updated: self.update_pin_image(
@@ -759,7 +785,8 @@ class Application:
 
     def groups(self):
         created = self.workspace.get("groups") or []
-        return sorted({"Default", self.group, *created, *(win.state["group"] for win in self.pin_windows.values())})
+        available = ["Default", *created, self.group, *(win.state["group"] for win in self.pin_windows.values())]
+        return list(dict.fromkeys(available))
 
     def create_group(self, name=None):
         if not isinstance(name, str):
@@ -769,8 +796,88 @@ class Application:
                 return
         name = name.strip()[:100]
         if name:
-            self.workspace.set("groups", sorted(set(self.groups()) | {name}))
+            self.workspace.set("groups", list(dict.fromkeys([*self.groups(), name])))
             self.switch_group(name)
+
+    def manage_groups(self):
+        dialog = QDialog(self.dashboard if self.dashboard.isVisible() else None)
+        dialog.setWindowTitle(self.tr("Pin groups", "贴图分组"))
+        dialog.resize(455, 330)
+        layout = QVBoxLayout(dialog)
+        groups = QListWidget()
+        groups.setAccessibleName(dialog.windowTitle())
+        layout.addWidget(groups, 1)
+
+        def refresh(selected=None):
+            names = self.groups()
+            groups.clear()
+            groups.addItems(names)
+            groups.setCurrentRow(names.index(selected) if selected in names else names.index(self.group))
+
+        def selected():
+            item = groups.currentItem()
+            return item.text() if item else self.group
+
+        def rename():
+            source = selected()
+            if source == "Default":
+                return
+            name, ok = QInputDialog.getText(dialog, self.tr("Rename group", "重命名分组"),
+                                            self.tr("New name", "新名称"), text=source)
+            name = name.strip()[:100]
+            if ok and name and name not in self.groups():
+                for pin_id, window in self.pin_windows.items():
+                    if window.state["group"] == source:
+                        window.state["group"] = name
+                        self.save_pin(pin_id)
+                self.workspace.set("groups", [name if group == source else group for group in self.groups()])
+                self.switch_group(name if self.group == source else self.group)
+                refresh(name)
+
+        def remove():
+            source = selected()
+            if source == "Default":
+                return
+            approved = QMessageBox.question(dialog, self.tr("Remove group", "移除分组"),
+                                            self.tr("Move its pins to Default and remove this group?", "把该组贴图移至默认分组并移除此组？"))
+            if approved != QMessageBox.StandardButton.Yes:
+                return
+            for pin_id, window in self.pin_windows.items():
+                if window.state["group"] == source:
+                    window.state["group"] = "Default"
+                    self.save_pin(pin_id)
+            self.workspace.set("groups", [name for name in self.groups() if name != source])
+            self.switch_group("Default" if self.group == source else self.group)
+            refresh()
+
+        def move(step):
+            row = groups.currentRow()
+            names = self.groups()
+            target = row + step
+            if row > 0 and 0 < target < len(names):
+                names[row], names[target] = names[target], names[row]
+                self.workspace.set("groups", names)
+                self.rebuild_tray()
+                refresh(names[target])
+
+        row = QHBoxLayout()
+        for en, zh, callback in (
+            ("New…", "新建…", lambda: (self.create_group(), refresh())),
+            ("Rename…", "重命名…", rename), ("Remove…", "移除…", remove),
+            ("Up", "上移", lambda: move(-1)), ("Down", "下移", lambda: move(1)),
+        ):
+            button = QPushButton(self.tr(en, zh))
+            button.clicked.connect(callback)
+            row.addWidget(button)
+        layout.addLayout(row)
+        bottom = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        switch = bottom.addButton(self.tr("Switch to group", "切换到该组"), QDialogButtonBox.ButtonRole.ActionRole)
+        switch.clicked.connect(lambda: self.switch_group(selected()))
+        bottom.rejected.connect(dialog.reject)
+        groups.itemDoubleClicked.connect(lambda item: self.switch_group(item.text()))
+        layout.addWidget(bottom)
+        refresh()
+        self.keep_dialog(dialog)
 
     def switch_group(self, name):
         if name != self.group:
@@ -870,8 +977,12 @@ class Application:
                 self.notify(self.tr(f"Could not open {filename}", f"无法打开 {filename}"), error=True)
             else:
                 state = {}
-                if path.suffix.lower() == ".gif" and path.stat().st_size <= 25_000_000:
-                    state["animation"] = b64encode(path.read_bytes()).decode("ascii")
+                if path.suffix.lower() == ".gif":
+                    try:
+                        if path.stat().st_size <= 25_000_000:
+                            state["animation"] = b64encode(path.read_bytes()).decode("ascii")
+                    except OSError:
+                        pass
                 self.open_pin(image, position, state=state)
 
     def update_lists(self):
@@ -920,10 +1031,18 @@ class Application:
         self.recognition_jobs[job_id] = action, done
         self.status(self.tr("Recognizing locally…", "正在离线识别…"))
         image = image.copy()
+        provider = self.workspace.get("ocr_provider") if action in {"ocr", "ocr-copy"} else "local"
+        if provider != "local":
+            self.status(self.tr(f"Sending the image to {provider}…", f"正在将图像发送给 {provider}…"))
 
         def run():
             try:
-                result = recognize(image, action)
+                if provider == "local":
+                    result = recognize(image, action)
+                else:
+                    from .cloud_ocr import recognize_cloud
+
+                    result = recognize_cloud(image, provider)
                 self.signals.recognition.emit(job_id, result, "")
             except Exception as error:
                 self.signals.recognition.emit(job_id, "", str(error))
@@ -954,7 +1073,7 @@ class Application:
         layout.addWidget(buttons)
         self.keep_dialog(dialog)
 
-    def scroll_capture(self, initial, region, done):
+    def scroll_capture(self, initial, region, done, *, restore_dashboard=False):
         from .capture import CaptureError, capture_desktop
 
         current = initial
@@ -986,6 +1105,8 @@ class Application:
 
             def grab():
                 nonlocal current
+                if dialog not in self.dialogs:
+                    return
                 try:
                     snapshot = capture_desktop(include_cursor=False)
                     next_image = snapshot.crop(region)
@@ -1013,6 +1134,8 @@ class Application:
         pin.clicked.connect(lambda: finish("pin"))
         if done:
             dialog.rejected.connect(lambda: done(code=1, error="Scrolling capture cancelled."))
+        if restore_dashboard or not QSystemTrayIcon.isSystemTrayAvailable():
+            dialog.finished.connect(lambda: self.dashboard.show())
         self.keep_dialog(dialog)
 
     def settings(self):
@@ -1170,7 +1293,7 @@ class Application:
         elif command == "switch-group-prev":
             self.switch_group(self.previous_group)
         elif command in {"show-group-manager", "switch-groups"}:
-            self.show_dashboard(2)
+            self.manage_groups()
         elif command == "empty-group":
             for pin_id in [item for item, window in self.pin_windows.items() if window.state["group"] == self.group]:
                 self.pin_action("delete", pin_id)
@@ -1285,46 +1408,49 @@ def smoke_test(qt, ocr=False):
 
     with tempfile.TemporaryDirectory(prefix="snaploom-smoke-") as directory:
         app = Application(qt, Path(directory), testing=True)
-        image = QImage(480, 180, QImage.Format.Format_RGB32)
-        image.fill(Qt.GlobalColor.white)
-        geometry = QRect(0, 0, 480, 180)
-        snapshot = Snapshot(image, geometry)
-        selected = QRect(5, 5, 210, 90)
-        editor = CaptureEditor(snapshot, selection=selected)
-        assert editor.selected_geometry() == selected
-        assert editor.export_image().size() == selected.size()
-        app.workspace.remember(image, geometry, "copy")
-        assert app.workspace.history_image(app.workspace.history()[0][0]).size() == image.size()
-        pin_id = app.open_pin(image, QPoint(20, 40))
-        app.pin_action("hide", pin_id)
-        assert not app.pin_windows[pin_id].isVisible()
-        app.pin_action("show", pin_id)
-        path = save_image(image, Path(directory) / "capture.png")
-        assert read_image(path).size() == image.size()
-        if ocr:
-            from PySide6.QtGui import QFont, QPainter
-
-            painter = QPainter(image)
-            painter.setPen(QColor("black"))
-            painter.setFont(QFont("Arial", 32, QFont.Weight.Bold))
-            painter.drawText(image.rect(), Qt.AlignmentFlag.AlignCenter, "SNAPLOOM 123")
-            painter.end()
-            result = recognize(image, "ocr")
-            assert "SNAPLOOM" in result.upper(), result
-            import zxingcpp
-            from .imaging import pixels
-
-            barcode = zxingcpp.create_barcode("Snaploom", zxingcpp.BarcodeFormat.QRCode)
-            code = zxingcpp.write_barcode_to_image(barcode, scale=4)
-            code_image = QImage(memoryview(code), code.shape[1], code.shape[0], code.shape[1],
-                                QImage.Format.Format_Grayscale8).copy()
-            assert recognize(code_image, "barcode") == "Snaploom", pixels(code_image).shape
-        editor.close()
-        for pin in app.pin_windows.values():
-            pin.hide()
-        app.shutdown()
+        try:
+            image = QImage(480, 180, QImage.Format.Format_RGB32)
+            image.fill(Qt.GlobalColor.white)
+            geometry = QRect(0, 0, 480, 180)
+            snapshot = Snapshot(image, geometry)
+            selected = QRect(5, 5, 210, 90)
+            editor = CaptureEditor(snapshot, selection=selected)
+            assert editor.selected_geometry() == selected, "Selection coordinates changed"
+            assert editor.export_image().size() == selected.size(), "Export size changed"
+            app.workspace.remember(image, geometry, "copy")
+            assert app.workspace.history_image(app.workspace.history()[0][0]).size() == image.size(), "History reload failed"
+            pin_id = app.open_pin(image, QPoint(20, 40))
+            app.pin_action("hide", pin_id)
+            assert not app.pin_windows[pin_id].isVisible(), "Pin hide failed"
+            app.pin_action("show", pin_id)
+            path = save_image(image, Path(directory) / "capture.png")
+            assert read_image(path).size() == image.size(), "PNG round trip failed"
+            if ocr:
+                smoke_recognition()
+            editor.close()
+        finally:
+            for pin in app.pin_windows.values():
+                pin.hide()
+            app.shutdown()
     print("Snaploom smoke test passed")
     return 0
+
+
+def smoke_recognition():
+    import zxingcpp
+    from PIL import Image, ImageDraw, ImageFont
+
+    sample = Image.new("RGB", (480, 180), "white")
+    ImageDraw.Draw(sample).text((240, 90), "SNAPLOOM 123", fill="black",
+                                font=ImageFont.load_default(size=44), anchor="mm")
+    fixture = QImage(sample.tobytes(), 480, 180, 1440, QImage.Format.Format_RGB888).copy()
+    result = recognize(fixture, "ocr")
+    assert "SNAPLOOM" in result.upper(), f"OCR result: {result!r}"
+    barcode = zxingcpp.create_barcode("Snaploom", zxingcpp.BarcodeFormat.QRCode)
+    code = zxingcpp.write_barcode_to_image(barcode, scale=4)
+    code_image = QImage(memoryview(code), code.shape[1], code.shape[0], code.shape[1],
+                        QImage.Format.Format_Grayscale8).copy()
+    assert recognize(code_image, "barcode") == "Snaploom", "QR decode failed"
 
 
 def main(values=None):
@@ -1343,6 +1469,26 @@ def main(values=None):
         return result
     if data.get("command") in {"quit", "exit"}:
         return 0
+    output = set(data.get("output") or [])
+    needs_resident = (
+        data.get("command") == "snip" and (not output or bool(output & {"clipboard", "pin", "ocr_clipboard", "copy-file"}))
+    ) or data.get("command") in {"ocr", "barcode-scan", "barcode-decode"}
+    if data.get("block") and needs_resident:
+        executable = Path(sys.executable)
+        command = ["--background"]
+        if not getattr(sys, "frozen", False):
+            command.insert(0, str(Path(sys.argv[0]).resolve()))
+        elif sys.platform == "win32" and executable.name.lower() == "snaploom-cli.exe":
+            executable = executable.with_name("Snaploom.exe")
+        if QProcess.startDetached(str(executable), command)[0]:
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                result = send_to_instance(data)
+                if result is not None:
+                    return result
+                time.sleep(0.1)
+        print("Could not start the Snaploom background application.", file=sys.stderr)
+        return 2
     location = data_directory()
     location.mkdir(parents=True, exist_ok=True)
     lock = QLockFile(str(location / "instance.lock"))
@@ -1358,10 +1504,10 @@ def main(values=None):
                 print(text)
             if error:
                 print(error, file=sys.stderr)
-            if not set(data.get("output") or []) & {"clipboard", "pin", "ocr_clipboard"}:
-                qt.exit(code)
+            qt.exit(code)
 
         QTimer.singleShot(0, lambda: application.command(data, print_result))
+        QTimer.singleShot(int(data["block"] * 1000), lambda: qt.exit(2))
     else:
         QTimer.singleShot(0, lambda: application.command(data))
     return qt.exec()

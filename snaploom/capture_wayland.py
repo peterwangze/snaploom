@@ -26,6 +26,7 @@ async def _portal_uri() -> str:
 
     bus = await MessageBus().connect()
     request_path = None
+    request_sender = None
     try:
         loop = asyncio.get_running_loop()
         response = loop.create_future()
@@ -39,11 +40,16 @@ async def _portal_uri() -> str:
                 message.message_type == MessageType.SIGNAL
                 and message.interface == _REQUEST
                 and message.member == "Response"
+                and message.signature == "ua{sv}"
             ):
-                if message.path in {request_path, expected_path} and not response.done():
+                if (
+                    message.path == request_path
+                    and message.sender == request_sender
+                    and not response.done()
+                ):
                     response.set_result(message.body)
-                elif request_path is None:
-                    early_responses[message.path] = message.body
+                elif request_path is None and message.path == expected_path:
+                    early_responses[message.sender] = message.body
 
         bus.add_message_handler(on_message)
         reply = await bus.call(
@@ -74,8 +80,9 @@ async def _portal_uri() -> str:
         if reply.message_type == MessageType.ERROR or not reply.body:
             raise CaptureError(f"Wayland 截图门户不可用（{reply.error_name or '未返回截图请求'}）。")
         request_path = reply.body[0]
-        if request_path in early_responses and not response.done():
-            response.set_result(early_responses[request_path])
+        request_sender = reply.sender
+        if request_path == expected_path and request_sender in early_responses and not response.done():
+            response.set_result(early_responses[request_sender])
         code, values = await asyncio.wait_for(response, 60)
         if code == 1:
             raise CaptureError("已取消系统截图授权。")

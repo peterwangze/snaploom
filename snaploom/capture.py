@@ -130,7 +130,7 @@ def _backend() -> str:
 
 def capture_capabilities() -> dict[str, object]:
     backend = _backend()
-    return {
+    capabilities = {
         "backend": backend,
         "desktop": backend in {"windows", "macos", "x11", "wayland"},
         "window_detection": backend in {"windows", "macos", "x11"},
@@ -142,6 +142,18 @@ def capture_capabilities() -> dict[str, object]:
             else ""
         ),
     }
+    if backend == "macos":
+        from .capture_mac import permission_status
+
+        screen_allowed, accessibility_allowed = permission_status()
+        capabilities["screen_permission"] = screen_allowed
+        capabilities["accessibility_permission"] = accessibility_allowed
+        capabilities["element_detection"] = accessibility_allowed
+        if not screen_allowed:
+            capabilities["reason"] = "请在 macOS 系统设置中允许屏幕录制。"
+        elif not accessibility_allowed:
+            capabilities["reason"] = "请在 macOS 系统设置中允许辅助功能以识别控件。"
+    return capabilities
 
 
 def _normalized_image(image: QImage) -> QImage:

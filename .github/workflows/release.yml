@@ -88,6 +88,7 @@ jobs:
           ldd "$plugin_dir/platforms/libqxcb.so" | tee "$RUNNER_TEMP/qt-xcb-deps.txt"
           if grep -q 'not found' "$RUNNER_TEMP/qt-xcb-deps.txt"; then exit 1; fi
           xvfb-run -a python run_snaploom.py --smoke-test
+          SNAPLOOM_TEST_DESKTOP=1 xvfb-run -a python -m unittest discover -s tests -p test_capture.py -v
       - name: Build and verify offline installer
         if: runner.os != 'Linux'
         run: python packaging/build.py --smoke

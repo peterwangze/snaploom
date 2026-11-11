@@ -1,5 +1,7 @@
 Snaploom 是离线运行的截图、标注和贴图工具。请选择与你的系统和处理器匹配的安装包。应用、Python 运行时和 OCR 模型都已打包。
 
+此版本提供截图、标注、贴图、历史、离线 OCR、条码识别和滚动拼接。Snipaste 功能对照与平台验收边界见 [交付验收记录](https://github.com/peterwangze/snaploom/blob/v1.0.0/docs/release-verification.md)。
+
 | 系统 | 安装包 | 运行条件 |
 | --- | --- | --- |
 | Windows x64 | `*-setup.exe` 或 `*-portable.zip` | Windows 10 或 Windows 11 |

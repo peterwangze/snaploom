@@ -70,8 +70,10 @@ def arguments(values):
     if parsed.command == "snip":
         if not 0 <= parsed.delay <= 600:
             parser.error("--delay must be between 0 and 600 seconds.")
-        if parsed.rect and min(parsed.rect[2:]) <= 0 or parsed.size and min(parsed.size) <= 0:
+        if parsed.rect and min(parsed.rect[2:]) <= 0:
             parser.error("Capture width and height must be positive.")
+    if getattr(parsed, "size", None) and min(parsed.size) <= 0:
+        parser.error("Capture width and height must be positive.")
     if getattr(parsed, "block", None) is not None and not 0.1 <= parsed.block <= 600:
         parser.error("--block must be between 0.1 and 600 seconds.")
     data = vars(parsed)
@@ -136,7 +138,7 @@ def send_to_instance(data):
             return int(result.get("code", 0))
         except (ValueError, TypeError):
             return 2
-    return 0
+    return 2 if block else 0
 
 
 class CommandServer:

@@ -141,3 +141,25 @@ def stitch_images(before: QImage, after: QImage) -> QImage | None:
                       QRect(0, height - displacement, width, displacement))
     painter.end()
     return combined
+
+
+def shadowed(image: QImage) -> QImage:
+    import cv2
+    import numpy as np
+
+    source = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width, height = source.width(), source.height()
+    if width * height > 70_000_000:
+        raise ValueError("The image is too large to add a shadow.")
+    rgba = np.frombuffer(source.constBits(), dtype=np.uint8).reshape(height, width, 4)
+    margin = 24
+    output = np.zeros((height + margin * 2, width + margin * 2, 4), dtype=np.uint8)
+    mask = output[:, :, 3].copy()
+    mask[margin + 5:margin + 5 + height, margin:margin + width] = rgba[:, :, 3]
+    output[:, :, 3] = (cv2.GaussianBlur(mask, (0, 0), 8) * 0.55).astype(np.uint8)
+    canvas = QImage(output, output.shape[1], output.shape[0], output.strides[0],
+                    QImage.Format.Format_RGBA8888).copy()
+    painter = QPainter(canvas)
+    painter.drawImage(QPoint(margin, margin), source)
+    painter.end()
+    return canvas

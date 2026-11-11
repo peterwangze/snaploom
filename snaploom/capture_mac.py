@@ -178,9 +178,29 @@ def detect_windows() -> list[tuple[QRect, str]]:
     return [(rect, title) for rect, title, _pid in _quartz_windows()]
 
 
+def permission_status() -> tuple[bool, bool]:
+    native = _native()
+    return native.preflight(), native.ax_trusted()
+
+
+def _frontmost_process() -> int:
+    objc = C.CDLL("/usr/lib/libobjc.A.dylib")
+    get_class = _bind(objc, "objc_getClass", _reference, C.c_char_p)
+    selector = _bind(objc, "sel_registerName", _reference, C.c_char_p)
+    message = C.cast(objc.objc_msgSend, _reference).value
+    send_object = C.CFUNCTYPE(_reference, _reference, _reference)(message)
+    send_pid = C.CFUNCTYPE(C.c_int, _reference, _reference)(message)
+    workspace = send_object(get_class(b"NSWorkspace"), selector(b"sharedWorkspace"))
+    application = send_object(workspace, selector(b"frontmostApplication"))
+    return send_pid(application, selector(b"processIdentifier")) if application else 0
+
+
 def active_window() -> QRect | None:
     windows = _quartz_windows()
-    return windows[0][0] if windows else None
+    if not windows:
+        return None
+    pid = _frontmost_process()
+    return next((rect for rect, _title, owner in windows if owner == pid), windows[0][0])
 
 
 def detect_elements(position: QPoint) -> list[tuple[QRect, str]]:
