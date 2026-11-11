@@ -1,0 +1,312 @@
+"""Accessible workspace and preferences for Snaploom."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
+    QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+)
+
+from .hotkeys import LABELS
+
+
+HOTKEY_ZH = {
+    "capture": "区域截图", "paste": "从剪贴板贴图／恢复贴图", "toggle_pins": "显示或隐藏贴图",
+    "repeat": "重复上次区域", "click_through": "切换贴图鼠标穿透", "active": "截取当前窗口",
+}
+
+
+class Dashboard(QWidget):
+    action = Signal(str)
+    history_action = Signal(str, int)
+    pin_action = Signal(str, int)
+    files_dropped = Signal(list)
+
+    def __init__(self, translate):
+        super().__init__()
+        self.tr = translate
+        self.setWindowTitle("Snaploom")
+        self.resize(820, 610)
+        self.setMinimumSize(630, 530)
+        self.setAcceptDrops(True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 14)
+        layout.setSpacing(15)
+        header = QFrame(objectName="Brand")
+        content = QHBoxLayout(header)
+        content.setContentsMargins(21, 15, 21, 15)
+        title = QLabel("Snaploom", objectName="BrandTitle")
+        title.setAccessibleName("Snaploom")
+        content.addWidget(title)
+        content.addStretch()
+        content.addWidget(QLabel(self.tr("Screenshot workspace", "截图工作台"), objectName="BrandSubtitle"))
+        layout.addWidget(header)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
+        self.tabs.addTab(self.home(), self.tr("Capture", "截图"))
+        self.history_list = QListWidget()
+        self.pin_list = QListWidget()
+        self.history_list.setAccessibleName(self.tr("Screenshot history", "截图历史"))
+        self.pin_list.setAccessibleName(self.tr("Pinned references", "贴图"))
+        self.history_list.itemDoubleClicked.connect(lambda item: self.history_action.emit("preview", item.data(Qt.ItemDataRole.UserRole)))
+        self.pin_list.itemDoubleClicked.connect(lambda item: self.pin_action.emit("show", item.data(Qt.ItemDataRole.UserRole)))
+        history_page = self.list_page(self.history_list, [
+            ("preview", "Preview", "预览"), ("copy", "Copy", "复制"), ("pin", "Pin", "贴图"),
+            ("save", "Save", "保存"), ("delete", "Delete", "删除"), ("clear", "Clear history…", "清空历史…"),
+        ], self.history_action)
+        pins_page = self.list_page(self.pin_list, [
+            ("show", "Show", "显示"), ("hide", "Hide", "隐藏"), ("recover", "Recover off-screen", "找回屏幕外贴图"),
+            ("group", "Group…", "分组…"), ("solo", "Solo", "仅显示选中贴图"), ("delete", "Delete", "删除"),
+        ], self.pin_action)
+        self.pin_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.tabs.addTab(history_page, self.tr("History", "历史"))
+        self.tabs.addTab(pins_page, self.tr("Pins", "贴图"))
+        bottom = QHBoxLayout()
+        self.status = QLabel(self.tr("Ready", "就绪"))
+        self.status.setWordWrap(True)
+        self.status.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        bottom.addWidget(self.status)
+        prefs = QPushButton(self.tr("Settings", "设置"))
+        prefs.clicked.connect(lambda: self.action.emit("settings"))
+        bottom.addWidget(prefs)
+        layout.addLayout(bottom)
+        self.setStyleSheet("""
+            #Brand { background: #152841; border-radius: 12px; }
+            #BrandTitle { color: #ffffff; font-size: 25px; font-weight: bold; }
+            #BrandSubtitle { color: #bdcce1; }
+            QPushButton { padding: 7px 11px; }
+            QPushButton#Primary { background: #2164d5; color: white; border: 1px solid #1859bc;
+                                  border-radius: 9px; font-weight: bold; padding: 15px; }
+            QPushButton#Primary:hover { background: #1859bc; }
+            QPushButton#Primary:focus { border: 2px solid #82afff; }
+            QPushButton#Secondary { padding: 15px; font-weight: bold; }
+            QLabel#Section { font-size: 15px; font-weight: bold; }
+            QTabWidget::pane { top: -1px; }
+            QListWidget::item { padding: 7px; }
+        """)
+
+    def home(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 18, 16, 16)
+        layout.setSpacing(12)
+        actions = QHBoxLayout()
+        for action, en, zh, style in (
+            ("capture", "Capture region", "区域截图", "Primary"),
+            ("paste", "Paste or restore pin", "贴图或恢复", "Secondary"),
+        ):
+            button = QPushButton(self.tr(en, zh), objectName=style)
+            button.setMinimumHeight(55)
+            button.clicked.connect(lambda checked=False, selected=action: self.action.emit(selected))
+            actions.addWidget(button, 1)
+        layout.addLayout(actions)
+        self.shortcuts = QLabel()
+        self.shortcuts.setWordWrap(True)
+        layout.addWidget(self.shortcuts)
+        layout.addSpacing(12)
+        layout.addWidget(QLabel(self.tr("Capture modes", "截图方式"), objectName="Section"))
+        for row in (
+            (("screen", "Current display", "当前屏幕"), ("full", "All displays", "所有屏幕"), ("active", "Active window", "当前窗口")),
+            (("repeat", "Repeat last region", "重复上次区域"), ("custom", "Size and delay…", "尺寸与延时…"),
+             ("whiteboard", "Whiteboard…", "白板…")),
+        ):
+            line = QHBoxLayout()
+            for action, en, zh in row:
+                button = QPushButton(self.tr(en, zh))
+                button.clicked.connect(lambda checked=False, selected=action: self.action.emit(selected))
+                line.addWidget(button, 1)
+            layout.addLayout(line)
+        layout.addSpacing(10)
+        line = QHBoxLayout()
+        for action, en, zh in (("open", "Open image…", "打开图像…"), ("toggle_pins", "Show or hide pins", "显示或隐藏贴图")):
+            button = QPushButton(self.tr(en, zh))
+            button.clicked.connect(lambda checked=False, selected=action: self.action.emit(selected))
+            line.addWidget(button, 1)
+        layout.addLayout(line)
+        layout.addStretch(1)
+        return page
+
+    def list_page(self, widget, buttons, signal):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(widget)
+        row = QHBoxLayout()
+        row.setSpacing(5)
+        for action, en, zh in buttons:
+            button = QPushButton(self.tr(en, zh))
+            button.clicked.connect(lambda checked=False, selected=action: self.emit_selection(widget, selected, signal))
+            row.addWidget(button)
+        layout.addLayout(row)
+        return page
+
+    def emit_selection(self, widget, action, signal):
+        if action in {"clear", "recover", "solo"}:
+            current = widget.currentItem()
+            signal.emit(action, current.data(Qt.ItemDataRole.UserRole) if current else -1)
+            return
+        ids = [item.data(Qt.ItemDataRole.UserRole) for item in widget.selectedItems()]
+        for item_id in ids:
+            signal.emit(action, item_id)
+
+    def update_history(self, rows):
+        self.history_list.clear()
+        for item_id, timestamp, region, action in rows:
+            stamp = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            item = QListWidgetItem(f"{stamp}    {action}")
+            item.setData(Qt.ItemDataRole.UserRole, item_id)
+            self.history_list.addItem(item)
+        if self.history_list.count():
+            self.history_list.setCurrentRow(0)
+
+    def update_pins(self, pins):
+        selected = {item.data(Qt.ItemDataRole.UserRole) for item in self.pin_list.selectedItems()}
+        self.pin_list.clear()
+        for pin_id, window in pins.items():
+            label = self.tr("Visible", "已显示") if window.isVisible() else self.tr("Hidden", "已隐藏")
+            item = QListWidgetItem(f'{window.state["group"]}    ·    {window.image.width()} × {window.image.height()}    ·    {label}')
+            item.setData(Qt.ItemDataRole.UserRole, pin_id)
+            self.pin_list.addItem(item)
+            item.setSelected(pin_id in selected)
+        if self.pin_list.count() and not self.pin_list.selectedItems():
+            self.pin_list.setCurrentRow(0)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        files = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        if files:
+            self.files_dropped.emit(files)
+            event.acceptProposedAction()
+
+
+class Preferences(QDialog):
+    def __init__(self, workspace, translate, parent):
+        super().__init__(parent)
+        self.tr = translate
+        self.workspace = workspace
+        self.setWindowTitle(self.tr("Snaploom settings", "Snaploom 设置"))
+        self.resize(550, 470)
+        layout = QVBoxLayout(self)
+        tabs = QTabWidget()
+        layout.addWidget(tabs)
+        general = QWidget()
+        form = QFormLayout(general)
+        tabs.addTab(general, self.tr("General", "常规"))
+        self.fields = {}
+        for key, en, zh in (
+            ("auto_save", "Automatically save every completed capture", "自动保存每次已完成的截图"),
+            ("copy_after_save", "Copy the image after saving", "保存后同时复制图像"),
+            ("include_cursor", "Include the cursor in screenshots", "截图包含鼠标指针"),
+            ("restore_pins", "Restore pins on startup", "启动时恢复贴图"),
+            ("hide_pins_on_capture", "Hide pins during capture", "截图时隐藏贴图"),
+            ("run_at_login", "Start at sign-in", "登录时启动"),
+            ("start_hidden", "Start in the tray", "启动后收起到托盘"),
+            ("allow_remote_images", "Fetch images from clipboard URLs", "允许下载剪贴板网址中的图像"),
+            ("show_grid", "Show selection guides", "显示选区参考线"),
+        ):
+            box = QCheckBox(self.tr(en, zh))
+            box.setChecked(workspace.get(key))
+            form.addRow(box)
+            self.fields[key] = box
+        for key, en, zh, minimum, maximum in (
+            ("history_limit", "History items (0 disables)", "历史条数（0 为关闭）", 0, 1000),
+            ("default_pin_opacity", "Default pin opacity (%)", "贴图默认不透明度 (%)", 10, 100),
+        ):
+            spin = QSpinBox()
+            spin.setRange(minimum, maximum)
+            spin.setValue(workspace.get(key))
+            form.addRow(self.tr(en, zh), spin)
+            self.fields[key] = spin
+        output = QWidget()
+        output_form = QFormLayout(output)
+        tabs.addTab(output, self.tr("Output", "输出"))
+        folder = QLineEdit(workspace.get("save_folder"))
+        pick = QPushButton(self.tr("Browse…", "浏览…"))
+        pick.clicked.connect(lambda: self.choose_folder(folder))
+        row = QHBoxLayout()
+        row.addWidget(folder, 1)
+        row.addWidget(pick)
+        output_form.addRow(self.tr("Quick-save folder", "快速保存目录"), row)
+        self.fields["save_folder"] = folder
+        pattern = QLineEdit(workspace.get("save_pattern"))
+        pattern.setToolTip("Python strftime, %title%, %width%, %height%")
+        output_form.addRow(self.tr("Filename pattern", "文件名模板"), pattern)
+        self.fields["save_pattern"] = pattern
+        for key, en, zh, values in (
+            ("format", "Image format", "图像格式", ("png", "jpg", "webp", "bmp")),
+            ("color_format", "Color picker format", "取色格式", ("HEX", "RGB", "HSL", "HSV", "CMYK")),
+            ("hot_corner", "Capture by dwelling in a screen corner", "鼠标停留触发截图", ("", "top-left", "top-right", "bottom-left", "bottom-right")),
+            ("super_snip", "Modifier + right-drag to capture", "修饰键 + 右键拖拽截图", ("", "alt", "ctrl", "shift", "super")),
+        ):
+            combo = QComboBox()
+            combo.addItems(values)
+            combo.setCurrentText(workspace.get(key))
+            output_form.addRow(self.tr(en, zh), combo)
+            self.fields[key] = combo
+        shortcuts = QWidget()
+        shortcut_form = QFormLayout(shortcuts)
+        tabs.addTab(shortcuts, self.tr("Shortcuts", "快捷键"))
+        self.shortcuts = {}
+        for action, label in LABELS.items():
+            field = QLineEdit(workspace.get("hotkeys").get(action, ""))
+            field.setPlaceholderText(self.tr("Disabled", "未设置"))
+            shortcut_form.addRow(self.tr(label, HOTKEY_ZH[action]), field)
+            self.shortcuts[action] = field
+        hint = QLabel(self.tr("Examples: F1, Shift+F3, Ctrl+Alt+S. Leave blank to disable.",
+                              "例如 F1、Shift+F3、Ctrl+Alt+S。留空即禁用。"))
+        hint.setWordWrap(True)
+        shortcut_form.addRow(hint)
+        commands = QWidget()
+        command_layout = QVBoxLayout(commands)
+        tabs.addTab(commands, self.tr("Custom outputs", "自定义输出"))
+        command_hint = QLabel(self.tr(
+            "Enter one name = command per line. Use {image} for the saved file path. "
+            "Outputs run only when selected from the screenshot menu.",
+            "每行填写一项「名称 = 命令」。用 {image} 代替已保存的文件路径。"
+            "只有在截图菜单中选中后才会执行。",
+        ))
+        command_hint.setWordWrap(True)
+        command_layout.addWidget(command_hint)
+        self.commands = QPlainTextEdit()
+        self.commands.setPlainText("\n".join(
+            f"{name} = {command}" for name, command in workspace.get("custom_commands").items()
+        ))
+        self.commands.setPlaceholderText(self.tr("Open in editor = my-editor {image}", "在编辑器打开 = my-editor {image}"))
+        command_layout.addWidget(self.commands, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def choose_folder(self, field):
+        selected = QFileDialog.getExistingDirectory(self, self.tr("Quick-save folder", "快速保存目录"),
+                                                    field.text() or str(Path.home()))
+        if selected:
+            field.setText(selected)
+
+    def values(self):
+        data = {}
+        for key, widget in self.fields.items():
+            if isinstance(widget, QCheckBox):
+                data[key] = widget.isChecked()
+            elif isinstance(widget, QSpinBox):
+                data[key] = widget.value()
+            elif isinstance(widget, QComboBox):
+                data[key] = widget.currentText()
+            else:
+                data[key] = widget.text().strip()
+        data["hotkeys"] = {key: field.text().strip() for key, field in self.shortcuts.items()}
+        data["custom_commands"] = {}
+        for line in self.commands.toPlainText().splitlines():
+            name, separator, command = line.partition("=")
+            if separator and name.strip() and command.strip():
+                data["custom_commands"][name.strip()] = command.strip()
+        return data

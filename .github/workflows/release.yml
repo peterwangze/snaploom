@@ -1,0 +1,129 @@
+name: Offline installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snaploom-installers-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: ${{ matrix.platform }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2025, platform: windows, arch: x64 }
+          - { runner: macos-15-intel, platform: macos, arch: x64 }
+          - { runner: macos-15, platform: macos, arch: arm64 }
+          - { runner: ubuntu-22.04, platform: linux, arch: x64 }
+          - { runner: ubuntu-24.04-arm, platform: linux, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.arch }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            packaging/requirements-build.txt
+      - name: Verify version tag
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: test "$GITHUB_REF_NAME" = "v$(python -c 'from snaploom import VERSION; print(VERSION)')"
+      - name: Prepare Linux desktop libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libdbus-1-3 libegl1 libfontconfig1 libgl1 libglib2.0-0 libnss3 \
+            libsm6 libx11-xcb1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 \
+            libxext6 libxkbcommon-x11-0 libxrender1 xvfb xauth
+      - name: Prepare Inno Setup compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $snaploomInno = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          if (-not (Test-Path -LiteralPath $snaploomInno)) {
+            $snaploomTool = Join-Path $env:RUNNER_TEMP 'innosetup-6.5.4.exe'
+            $snaploomHome = Join-Path $env:RUNNER_TEMP 'Snaploom-Inno'
+            Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-6_5_4/innosetup-6.5.4.exe' -OutFile $snaploomTool
+            if ((Get-FileHash -LiteralPath $snaploomTool -Algorithm SHA256).Hash -ne 'FA73BF47A4DA250D185D07561C2BFDA387E5E20DB77E4570004CF6A133CC10B1') {
+              throw 'Inno Setup compiler checksum differs from the pinned release'
+            }
+            $snaploomInstall = Start-Process -FilePath $snaploomTool -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER',"/DIR=`"$snaploomHome`"" -Wait -PassThru -WindowStyle Hidden
+            if ($snaploomInstall.ExitCode -ne 0) { exit $snaploomInstall.ExitCode }
+            $snaploomInno = Join-Path $snaploomHome 'ISCC.exe'
+          }
+          if (-not (Test-Path -LiteralPath $snaploomInno)) { throw 'Inno Setup compiler was not found' }
+          "SNAPLOOM_ISCC=$snaploomInno" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install build and application dependencies
+        run: python -m pip install -r requirements.txt -r packaging/requirements-build.txt
+      - name: Test application
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+      - name: Verify Linux desktop startup
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a python run_snaploom.py --smoke-test
+      - name: Build and verify offline installer
+        run: python packaging/build.py --smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Snaploom-${{ matrix.platform }}-${{ matrix.arch }}
+          if-no-files-found: error
+          compression-level: 0
+          path: release/Snaploom-*
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Snaploom-*
+          merge-multiple: true
+          path: release
+      - name: Verify release assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="release/Snaploom-${GITHUB_REF_NAME#v}"
+          assets=(
+            "$base-windows-x64-setup.exe"
+            "$base-windows-x64-portable.zip"
+            "$base-macos-x64.dmg"
+            "$base-macos-arm64.dmg"
+            "$base-linux-x64-setup.run"
+            "$base-linux-x64.tar.gz"
+            "$base-linux-arm64-setup.run"
+            "$base-linux-arm64.tar.gz"
+          )
+          for artifact in "${assets[@]}"; do test -s "$artifact"; done
+          python packaging/build.py --checksums-only
+          (cd release && sha256sum -c SHA256SUMS.txt)
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Snaploom $GITHUB_REF_NAME" \
+            --notes-file packaging/release-notes.md "${assets[@]}" release/SHA256SUMS.txt
