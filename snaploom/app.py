@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from base64 import b64encode
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +20,7 @@ from PySide6.QtCore import QByteArray, QLocale, QLockFile, QMimeData, QObject, Q
 from PySide6.QtGui import QColor, QCursor, QIcon, QImage
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout,
+    QApplication, QCheckBox, QColorDialog, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout,
     QInputDialog, QLabel, QMenu, QMessageBox, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
     QTextEdit, QVBoxLayout,
 )
@@ -27,10 +28,10 @@ from PySide6.QtWidgets import (
 from . import VERSION
 from .commands import CommandServer, arguments, send_to_instance
 from .hotkeys import Hotkeys
-from .imaging import clipboard_images, read_image, recognize, stitch_images, text_image
+from .imaging import clipboard_images, parse_color, read_image, recognize, stitch_images, text_image
 from .pins import PinWindow
 from .storage import Workspace, data_directory, pictures_directory, png_bytes, save_image
-from .ui import Dashboard, Preferences
+from .ui import Dashboard, HOTKEY_ZH, Preferences
 
 
 class Signals(QObject):
@@ -170,7 +171,16 @@ class Application:
             f'{self.tr("Hide/show pins", "显示／隐藏贴图")}  {shortcuts.get("toggle_pins") or "—"}',
         ]
         if unavailable:
-            labels.append(self.tr("Some hotkeys are unavailable. Open Settings to change them.", "部分快捷键不可用，可在设置中修改。"))
+            details = []
+            for action in unavailable:
+                error = self.hotkeys.errors.get(action)
+                reason = {
+                    1409: self.tr("already in use", "已被占用"),
+                    "invalid": self.tr("invalid or duplicate", "无效或重复"),
+                }.get(error, self.tr("unavailable", "不可用"))
+                details.append(f"{shortcuts[action]} ({reason})")
+            labels.append(self.tr("Change in Settings: ", "请在设置中修改：") + ", ".join(details))
+            self.status(self.tr("Some global shortcuts could not be registered.", "部分全局快捷键注册失败。"))
         self.dashboard.shortcuts.setText("   ·   ".join(labels))
 
     def action(self, action):
@@ -519,6 +529,9 @@ class Application:
                 if not silent:
                     self.notify(self.tr("Image copied", "图像已复制"))
             elif action == "pin":
+                if rect.isValid():
+                    image = QImage(image)
+                    image.setDevicePixelRatio(max(1.0, image.width() / max(1, rect.width())))
                 self.open_pin(image, rect.topLeft() if rect.isValid() else None)
             elif action == "save":
                 target = self.save_dialog(image)
@@ -618,7 +631,10 @@ class Application:
         return save_image(image, target)
 
     def open_pin(self, image, position=None, pin_id=None, state=None, restore=False):
-        state = {"group": self.group, "opacity": self.workspace.get("default_pin_opacity")} | (state or {})
+        state = {"group": self.group, "opacity": self.workspace.get("default_pin_opacity"),
+                 "dpr": image.devicePixelRatio()} | (state or {})
+        image = QImage(image)
+        image.setDevicePixelRatio(state["dpr"])
         if position is not None:
             state.update({"x": position.x(), "y": position.y()})
         if restore and not self.workspace.get("restore_pins"):
@@ -697,6 +713,17 @@ class Application:
                 pin_id, dialog.result_base, [asdict(annotation) for annotation in dialog.annotations]
             ))
             self.keep_dialog(dialog)
+        elif action == "replace":
+            mime = self.qt.clipboard().mimeData()
+            images = clipboard_images(mime)
+            if images:
+                self.replace_pin_source(pin_id, images[0], self.clipboard_state(mime))
+        elif action == "edit-color":
+            current = QColor(window.state["color_card"])
+            color = QColorDialog.getColor(current, window)
+            if color.isValid():
+                text = color.name().upper()
+                self.replace_pin_source(pin_id, text_image(text), {"source_text": text, "color_card": text})
         else:
             self.output(window.view, action)
         self.update_lists()
@@ -704,10 +731,31 @@ class Application:
     def update_pin_image(self, pin_id, updated, annotations):
         window = self.pin_windows.get(pin_id)
         if window:
+            updated.setDevicePixelRatio(window.state.get("dpr", 1))
             window.state["annotations"] = annotations
+            window.state.pop("animation", None)
+            window.load_animation()
             window.replace(updated)
             self.save_pin(pin_id, include_image=True)
             self.update_lists()
+
+    def replace_pin_source(self, pin_id, image, state):
+        window = self.pin_windows[pin_id]
+        for key in ("source_text", "color_card", "animation", "paused", "annotations"):
+            window.state.pop(key, None)
+        window.state.update(state)
+        window.state["dpr"] = image.devicePixelRatio()
+        window.replace(image)
+        window.load_animation()
+        self.save_pin(pin_id, include_image=True)
+
+    @staticmethod
+    def clipboard_state(mime):
+        if mime is not None and mime.hasText() and not (mime.hasImage() or mime.hasUrls()):
+            text = mime.text()
+            color = parse_color(text)
+            return {"source_text": text, "color_card": color.name().upper() if color.isValid() else ""}
+        return {}
 
     def groups(self):
         created = self.workspace.get("groups") or []
@@ -772,7 +820,12 @@ class Application:
         if mime and mime.hasText() and self.workspace.get("allow_remote_images"):
             url = QUrl(mime.text().strip())
             if url.scheme() in {"https", "http"} and url.host() and not mime.hasImage():
-                self.fetch_pin(url)
+                self.fetch_pin(url, position)
+                return
+        if mime and mime.hasUrls() and not mime.hasImage():
+            local = [url.toLocalFile() for url in mime.urls() if url.isLocalFile() and Path(url.toLocalFile()).is_file()]
+            if local:
+                self.open_files(local, position)
                 return
         images = clipboard_images(mime)
         if images:
@@ -780,7 +833,7 @@ class Application:
             if fingerprint != self.last_fingerprint or not self.closed_pins:
                 self.last_fingerprint = fingerprint
                 for image in images:
-                    self.open_pin(image, position)
+                    self.open_pin(image, position, state=self.clipboard_state(mime))
                 return
         while self.closed_pins:
             pin_id = self.closed_pins.pop()
@@ -789,7 +842,7 @@ class Application:
                 return
         self.notify(self.tr("Clipboard has no supported content.", "剪贴板中没有可贴图的内容。"))
 
-    def fetch_pin(self, url):
+    def fetch_pin(self, url, position=None):
         request = QNetworkRequest(url)
         request.setTransferTimeout(12000)
         request.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute, QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy)
@@ -801,7 +854,7 @@ class Application:
             if response.error() == QNetworkReply.NetworkError.NoError:
                 image = QImage.fromData(response.readAll())
                 if not image.isNull():
-                    self.open_pin(image)
+                    self.open_pin(image, position)
                     response.deleteLater()
                     return
             self.notify(self.tr("Could not download an image from the URL.", "该网址无法下载图像。"), error=True)
@@ -811,11 +864,15 @@ class Application:
 
     def open_files(self, files, position=None):
         for filename in files:
-            image = read_image(Path(filename))
+            path = Path(filename)
+            image = read_image(path)
             if image.isNull():
                 self.notify(self.tr(f"Could not open {filename}", f"无法打开 {filename}"), error=True)
             else:
-                self.open_pin(image, position)
+                state = {}
+                if path.suffix.lower() == ".gif" and path.stat().st_size <= 25_000_000:
+                    state["animation"] = b64encode(path.read_bytes()).decode("ascii")
+                self.open_pin(image, position, state=state)
 
     def update_lists(self):
         self.dashboard.update_history(self.workspace.history())

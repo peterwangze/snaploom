@@ -50,15 +50,17 @@ class WindowsKeys(QAbstractNativeEventFilter):
         super().__init__()
         self.emit = emit
         self.bound = {}
+        self.errors = {}
+        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
         QApplication.instance().installNativeEventFilter(self)
 
     def register(self, names):
-        user32 = ctypes.windll.user32
         unavailable = []
         for slot, (action, (modifiers, key, code)) in enumerate(names.items(), 1):
-            if user32.RegisterHotKey(None, slot, 0x4000 | sum(MODIFIERS[item] for item in modifiers), code):
+            if self.user32.RegisterHotKey(None, slot, 0x4000 | sum(MODIFIERS[item] for item in modifiers), code):
                 self.bound[slot] = action
             else:
+                self.errors[action] = ctypes.get_last_error()
                 unavailable.append(action)
         return unavailable
 
@@ -74,7 +76,7 @@ class WindowsKeys(QAbstractNativeEventFilter):
 
     def close(self):
         for slot in self.bound:
-            ctypes.windll.user32.UnregisterHotKey(None, slot)
+            self.user32.UnregisterHotKey(None, slot)
         QApplication.instance().removeNativeEventFilter(self)
 
 
@@ -184,9 +186,11 @@ class Hotkeys(QObject):
         super().__init__()
         self.backend = None
         self.unavailable = []
+        self.errors = {}
 
     def configure(self, hotkeys):
         self.close()
+        self.errors = {}
         names = {}
         taken = set()
         unavailable = []
@@ -201,10 +205,12 @@ class Hotkeys(QObject):
                 taken.add(identity)
                 names[action] = value
             except ValueError:
+                self.errors[action] = "invalid"
                 unavailable.append(action)
         if names and sys.platform == "win32":
             self.backend = WindowsKeys(self.triggered.emit)
             unavailable.extend(self.backend.register(names))
+            self.errors.update(self.backend.errors)
         elif names and sys.platform.startswith("linux") and (
             os.getenv("XDG_SESSION_TYPE") == "wayland" or os.getenv("WAYLAND_DISPLAY")
         ):

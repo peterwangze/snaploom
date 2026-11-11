@@ -129,10 +129,10 @@ def freeze(work, icon):
     return work / "frozen" / ("Snaploom.app" if sys.platform == "darwin" else "Snaploom")
 
 
-def smoke(executable):
+def smoke(executable, *options):
     environment = os.environ.copy()
     environment.setdefault("QT_QPA_PLATFORM", "offscreen")
-    for option in ("--smoke-test", "--smoke-test-ocr"):
+    for option in options or ("--smoke-test", "--smoke-test-ocr"):
         run(executable, option, env=environment, timeout=90)
 
 
@@ -170,8 +170,10 @@ def package_windows(work, frozen, icon, notices, release, basename, verify):
         installed = work / "offline-install"
         run(setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", f"/DIR={installed}", timeout=150)
         try:
-            smoke(installed / executable.name)
-            run(installed / "Snaploom-cli.exe", "--version", timeout=30)
+            command_line = installed / "Snaploom-cli.exe"
+            smoke(command_line)
+            run(command_line, "--version", timeout=30)
+            smoke(installed / executable.name, "--smoke-test")
         finally:
             uninstaller = installed / "unins000.exe"
             if uninstaller.is_file():

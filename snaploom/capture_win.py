@@ -88,8 +88,8 @@ _get_class = _bind(_user, "GetClassNameW", C.c_int, W.HWND, W.LPWSTR, C.c_int)
 _get_title = _bind(_user, "GetWindowTextW", C.c_int, W.HWND, W.LPWSTR, C.c_int)
 _get_rect = _bind(_user, "GetWindowRect", W.BOOL, W.HWND, C.POINTER(W.RECT))
 _get_active = _bind(_user, "GetForegroundWindow", W.HWND)
-_window_from_point = _bind(_user, "WindowFromPoint", W.HWND, W.POINT)
-_get_parent = _bind(_user, "GetParent", W.HWND, W.HWND)
+_screen_to_client = _bind(_user, "ScreenToClient", W.BOOL, W.HWND, C.POINTER(W.POINT))
+_child_from_point = _bind(_user, "ChildWindowFromPointEx", W.HWND, W.HWND, W.POINT, W.UINT)
 _dwm_attr = _bind(_dwm, "DwmGetWindowAttribute", W.LONG, W.HWND, W.DWORD, C.c_void_p, W.DWORD)
 
 
@@ -240,9 +240,8 @@ def _window_rect(window, *, frame: bool = True) -> QRect:
     return _qt_rect(rect) if _get_rect(window, C.byref(rect)) else QRect()
 
 
-def detect_windows() -> list[tuple[QRect, str]]:
-    mapping = _monitor_mapping(QGuiApplication.screens())
-    result: list[tuple[QRect, str]] = []
+def _visible_windows(point: W.POINT | None = None) -> list[tuple[W.HWND, QRect]]:
+    result: list[tuple[W.HWND, QRect]] = []
     own_pid = os.getpid()
 
     @_window_callback
@@ -256,12 +255,28 @@ def detect_windows() -> list[tuple[QRect, str]]:
         cloaked = W.DWORD()
         if _dwm_attr(window, 14, C.byref(cloaked), C.sizeof(cloaked)) == 0 and cloaked.value:
             return True
-        rect = _desktop_rect(_window_rect(window), mapping)
-        if not rect.isEmpty():
-            result.append((rect, _window_title(window) or "窗口"))
+        rect = _window_rect(window)
+        if rect.isEmpty():
+            return True
+        if point is not None:
+            if not rect.contains(point.x, point.y):
+                return True
+            result.append((window, rect))
+            return False
+        result.append((window, rect))
         return True
 
     _enum_windows(add, 0)
+    return result
+
+
+def detect_windows() -> list[tuple[QRect, str]]:
+    mapping = _monitor_mapping(QGuiApplication.screens())
+    result = []
+    for window, physical in _visible_windows():
+        rect = _desktop_rect(physical, mapping)
+        if not rect.isEmpty():
+            result.append((rect, _window_title(window) or "窗口"))
     return result
 
 
@@ -274,19 +289,31 @@ def active_window() -> QRect | None:
 
 
 def detect_elements(position: QPoint) -> list[tuple[QRect, str]]:
+    from .capture_uia import elements
+
     mapping = _monitor_mapping(QGuiApplication.screens())
-    window = _window_from_point(_physical_point(position, mapping))
+    point = _physical_point(position, mapping)
+    windows = _visible_windows(point)
+    if not windows:
+        return []
+    window, _rect = windows[0]
+    accessible = [
+        (mapped, label)
+        for physical, label in elements(window, point)
+        if not (mapped := _desktop_rect(physical, mapping)).isEmpty()
+    ]
+    if len(accessible) > 1:
+        return accessible
     result: list[tuple[QRect, str]] = []
-    while window and len(result) < 24:
-        pid = W.DWORD()
-        _get_pid(window, C.byref(pid))
-        if pid.value == os.getpid():
-            break
+    for _ in range(24):
         rect = _desktop_rect(_window_rect(window, frame=False), mapping)
         if not rect.isEmpty() and (not result or rect != result[-1][0]):
             result.append((rect, _window_title(window) or _window_class(window)))
-        parent = _get_parent(window)
-        if parent == window:
+        client_point = W.POINT(point.x, point.y)
+        if not _screen_to_client(window, C.byref(client_point)):
             break
-        window = parent
-    return result
+        child = _child_from_point(window, client_point, 1 | 2 | 4)
+        if not child or child == window:
+            break
+        window = child
+    return list(reversed(result)) if len(result) > 1 else accessible or result

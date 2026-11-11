@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QImageReader, QPainter, QTextDocument
@@ -39,9 +40,19 @@ def read_image(path: Path) -> QImage:
     return reader.read()
 
 
+def parse_color(text: str) -> QColor:
+    if len(text) > 80:
+        return QColor()
+    rgb = re.fullmatch(r"(?:rgb\s*\()?\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)?",
+                       text.strip(), flags=re.IGNORECASE)
+    if rgb and all(int(channel) <= 255 for channel in rgb.groups()):
+        return QColor(*map(int, rgb.groups()))
+    return QColor(text.strip())
+
+
 def text_image(text: str, html: str = "") -> QImage:
-    color = QColor(text.strip())
-    if len(text) < 80 and (text.startswith("#") or color.isValid()) and color.isValid():
+    color = parse_color(text)
+    if color.isValid():
         image = QImage(245, 128, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(color)
         painter = QPainter(image)

@@ -17,6 +17,7 @@ from .capture import CaptureError, ScreenFrame, _normalized_image
 _display_type = C.c_void_p
 _window_type = C.c_ulong
 _atom_type = C.c_ulong
+_error_callback = C.CFUNCTYPE(C.c_int, _display_type, C.c_void_p)
 
 
 class _Monitor(C.Structure):
@@ -48,6 +49,7 @@ def _xlib():
     _bind(lib, "XOpenDisplay", _display_type, C.c_char_p)
     _bind(lib, "XCloseDisplay", C.c_int, _display_type)
     _bind(lib, "XDefaultRootWindow", _window_type, _display_type)
+    _bind(lib, "XSetErrorHandler", C.c_void_p, C.c_void_p)
     _bind(lib, "XFree", C.c_int, C.c_void_p)
     _bind(lib, "XInternAtom", _atom_type, _display_type, C.c_char_p, C.c_int)
     _bind(lib, "XGetAtomName", C.c_void_p, _display_type, _atom_type)
@@ -76,11 +78,24 @@ def _connection():
         yield None, None, None
         return
     display = xlib.XOpenDisplay(None)
+    if not display:
+        yield xlib, None, None
+        return
+    previous_address = None
+
+    @_error_callback
+    def ignore_closed_window(source, error):
+        # A window may be destroyed between the EWMH list and geometry request.
+        if source != display and previous_address:
+            return _error_callback(previous_address)(source, error)
+        return 0
+
+    previous_address = xlib.XSetErrorHandler(C.cast(ignore_closed_window, C.c_void_p))
     try:
-        yield xlib, display, xlib.XDefaultRootWindow(display) if display else None
+        yield xlib, display, xlib.XDefaultRootWindow(display)
     finally:
-        if display:
-            xlib.XCloseDisplay(display)
+        xlib.XCloseDisplay(display)
+        xlib.XSetErrorHandler(previous_address)
 
 
 def _property(xlib, display, window, name: bytes) -> list[int] | bytes:
@@ -208,7 +223,7 @@ def _window_geometry(xlib, display, root, window) -> QRect:
         return QRect()
     rectangle = QRect(x.value, y.value, width.value, height.value)
     frame = _property(xlib, display, window, b"_NET_FRAME_EXTENTS")
-    if len(frame) == 4 and all(value < 512 for value in frame):
+    if isinstance(frame, list) and len(frame) == 4 and all(value < 512 for value in frame):
         left, right, top, bottom = frame
         rectangle.adjust(-left, -top, right, bottom)
     return rectangle
@@ -238,6 +253,8 @@ def detect_windows() -> list[tuple[QRect, str]]:
             return []
         mapping = _monitor_mapping(xlib, display, root, QGuiApplication.screens())
         windows = _property(xlib, display, root, b"_NET_CLIENT_LIST_STACKING")
+        if not isinstance(windows, list):
+            return []
         desktop = _property(xlib, display, root, b"_NET_CURRENT_DESKTOP")
         hidden = xlib.XInternAtom(display, b"_NET_WM_STATE_HIDDEN", True)
         result = []
@@ -261,7 +278,7 @@ def active_window() -> QRect | None:
         if not display:
             return None
         active = _property(xlib, display, root, b"_NET_ACTIVE_WINDOW")
-        window = _window_type(active[0] if active else 0)
+        window = _window_type(active[0] if isinstance(active, list) and active else 0)
         if not window.value:
             revert = C.c_int()
             xlib.XGetInputFocus(display, C.byref(window), C.byref(revert))

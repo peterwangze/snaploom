@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+from base64 import b64decode
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QImage, QPainter, QTransform
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QImage, QMovie, QPainter, QTransform
 from PySide6.QtWidgets import QApplication, QColorDialog, QInputDialog, QMenu, QWidget
 
 
@@ -42,12 +43,60 @@ class PinWindow(QWidget):
         self.setAccessibleName(self.windowTitle())
         self.timer = QTimer(self, interval=180, singleShot=True)
         self.timer.timeout.connect(self.changed)
+        self.movie = None
+        self.movie_buffer = None
         self.apply_state()
         self.move(self.state["x"], self.state["y"])
+        self.load_animation()
 
-    def apply_state(self):
+    def load_animation(self):
+        if self.movie is not None:
+            self.movie.stop()
+            self.movie.deleteLater()
+            self.movie_buffer.deleteLater()
+            self.movie = None
+            self.movie_buffer = None
+        animation = self.state.get("animation")
+        if not animation:
+            return
+        self.movie_buffer = QBuffer(self)
+        self.movie_buffer.setData(QByteArray(b64decode(animation)))
+        self.movie_buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+        self.movie = QMovie(self.movie_buffer, b"gif", self)
+        if self.movie.isValid():
+            self.movie.frameChanged.connect(self.animate_frame)
+            if self.isVisible() and not self.state.get("paused"):
+                self.movie.start()
+
+    def animate_frame(self, frame):
+        current = self.movie.currentImage()
+        if not current.isNull():
+            self.apply_state(current, update_window=False)
+
+    def showEvent(self, event):
+        if self.movie and self.movie.isValid() and not self.state.get("paused"):
+            if self.movie.state() == QMovie.MovieState.NotRunning:
+                self.movie.start()
+            else:
+                self.movie.setPaused(False)
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        if self.movie and self.movie.state() == QMovie.MovieState.Running:
+            self.movie.setPaused(True)
+        super().hideEvent(event)
+
+    def toggle_movie(self, paused):
+        self.state["paused"] = paused
+        if not paused and self.movie.state() == QMovie.MovieState.NotRunning:
+            self.movie.start()
+        else:
+            self.movie.setPaused(paused)
+        self.timer.start()
+
+    def apply_state(self, frame=None, *, update_window=True):
         transform = QTransform().rotate(self.state["rotation"])
-        source = self.image
+        source = frame if frame is not None else self.image
         if self.state.get("annotations"):
             from .editor import Annotation, render_annotations
 
@@ -73,7 +122,8 @@ class PinWindow(QWidget):
         if self.state["invert"]:
             rendered.invertPixels()
         self.view = rendered
-        self.update_window_flags()
+        if update_window:
+            self.update_window_flags()
         self.update_size()
 
     def update_window_flags(self):
@@ -130,7 +180,13 @@ class PinWindow(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         background = self.state["background"]
-        if background:
+        if background == "checkerboard":
+            tile = 12
+            painter.fillRect(self.rect(), QColor("#e5e7eb"))
+            for y in range(0, self.height(), tile):
+                for x in range((y // tile % 2) * tile, self.width(), tile * 2):
+                    painter.fillRect(x, y, tile, tile, QColor("#a9b3c0"))
+        elif background:
             painter.fillRect(self.rect(), QColor(background))
         painter.drawImage(self.rect(), self.display_image())
         painter.setPen(QColor(0, 0, 0, 100))
@@ -299,9 +355,20 @@ class PinWindow(QWidget):
             ("annotate", "Annotate…", "标注…"), ("crop", "Crop…", "裁剪…"), ("print", "Print…", "打印…"),
             ("ocr", "Extract text…", "识别文字…"), ("barcode", "Read QR or barcode…", "识别二维码或条码…"),
             ("group", "Move to group…", "移至分组…"),
+            ("replace", "Replace from clipboard", "用剪贴板内容替换"),
         )
         for action, en, zh in entries:
             menu.addAction(self.tr(en, zh), lambda checked=False, selected=action: self.action_requested.emit(selected))
+        if self.state.get("source_text") is not None:
+            menu.addAction(self.tr("Copy original text", "复制原始文字"),
+                           lambda: QApplication.clipboard().setText(self.state["source_text"]))
+        if self.state.get("color_card"):
+            menu.addAction(self.tr("Edit color…", "编辑色值…"), lambda: self.action_requested.emit("edit-color"))
+        if self.movie:
+            paused = view_action = QAction(self.tr("Pause animation", "暂停动画"), menu,
+                                            checkable=True, checked=self.state.get("paused", False))
+            view_action.toggled.connect(self.toggle_movie)
+            menu.addAction(paused)
         menu.addSeparator()
         view = menu.addMenu(self.tr("Appearance", "外观"))
         for key, en, zh in (
@@ -315,6 +382,9 @@ class PinWindow(QWidget):
             view.addAction(action)
         view.addAction(self.tr("Rotate clockwise", "顺时针旋转"), lambda: self.set_state("rotation", (self.state["rotation"] + 90) % 360))
         view.addAction(self.tr("Background color…", "背景颜色…"), self.background_dialog)
+        view.addAction(self.tr("Checkerboard background", "棋盘背景"),
+                       lambda: self.set_state("background", "checkerboard"))
+        view.addAction(self.tr("Transparent background", "透明背景"), lambda: self.set_state("background", ""))
         view.addAction(self.tr("Display width…", "显示宽度…"), self.width_dialog)
         view.addAction(self.tr("Reset size and opacity", "重置尺寸与透明度"), self.reset)
         menu.addAction(self.tr("Hide", "隐藏"), lambda: self.dismissed.emit(False))

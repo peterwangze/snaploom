@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -22,6 +23,11 @@ analysis = Analysis(
     + copy_metadata("rapidocr_onnxruntime"),
     hiddenimports=[f"pynput.keyboard.{backend}", f"pynput.mouse.{backend}"],
 )
+if windows:
+    # Qt uses the Windows ICU ABI. A build host can expose unrelated ICU DLLs
+    # on PATH, where PyInstaller finds them before the operating system copy.
+    windows_icu = re.compile(r"icu(?:uc|in|dt)?\d*\.dll", re.IGNORECASE)
+    analysis.binaries = [entry for entry in analysis.binaries if not windows_icu.fullmatch(Path(entry[0]).name)]
 modules = PYZ(analysis.pure)
 
 application = EXE(
