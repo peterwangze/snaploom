@@ -14,6 +14,59 @@ from snaploom.editor import CaptureEditor
 
 @unittest.skipUnless(os.environ.get("SNAPLOOM_TEST_DESKTOP") == "1", "needs a live test desktop")
 class DesktopSelectionTests(unittest.TestCase):
+    def test_editor_accepts_width_input_and_undoes_one_change_on_the_desktop(self):
+        app = QApplication.instance() or QApplication([])
+        available = app.primaryScreen().availableGeometry()
+        geometry = QRect(QPoint(), QSize(740, 500).boundedTo(available.size()))
+        geometry.moveCenter(available.center())
+        source = QImage(geometry.size(), QImage.Format.Format_RGB32)
+        source.fill(Qt.GlobalColor.white)
+        selection = QRect(geometry.topLeft() + QPoint(24, 40), QSize(245, 178))
+        editor = CaptureEditor(Snapshot(source, geometry), selection=selection)
+        completed = []
+        editor.completed.connect(lambda *values: completed.append(values))
+
+        def click(widget, point=None):
+            point = widget.rect().center() if point is None else point
+            window = widget.window()
+            QTest.mouseClick(window.windowHandle(), Qt.MouseButton.LeftButton,
+                             pos=window.mapFromGlobal(widget.mapToGlobal(point)))
+            app.processEvents()
+
+        def type_width(value):
+            field = editor.stroke_width.lineEdit()
+            click(field)
+            window = field.window().windowHandle()
+            QTest.keyClick(window, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+            for digit in str(value):
+                QTest.keyClick(window, ord(digit))
+            QTest.keyClick(window, Qt.Key.Key_Return)
+            app.processEvents()
+            self.assertTrue(editor.isVisible())
+            self.assertEqual(completed, [])
+
+        try:
+            editor.show()
+            self.assertTrue(QTest.qWaitForWindowExposed(editor, 2000))
+            click(editor.tool_buttons["pen"])
+            type_width(12)
+            handle = editor.windowHandle()
+            start, end = QPoint(65, 100), QPoint(185, 100)
+            QTest.mousePress(handle, Qt.MouseButton.LeftButton, pos=start)
+            QTest.mouseMove(handle, end)
+            QTest.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=end)
+            self.assertEqual(editor.document.annotations[0].width, 12)
+            click(editor.tool_buttons["select"])
+            click(editor, QPoint(120, 100))
+            type_width(24)
+            self.assertEqual(editor.document.annotations[0].width, 24)
+            click(editor.undo_button)
+            self.assertEqual(editor.document.annotations[0].width, 12)
+            click(editor.redo_button)
+            self.assertEqual(editor.document.annotations[0].width, 24)
+        finally:
+            editor.close()
+
     def test_shrinking_selection_restores_pixels_on_the_desktop_surface(self):
         app = QApplication.instance() or QApplication([])
         screen = app.primaryScreen()

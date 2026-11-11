@@ -153,6 +153,8 @@ class Dashboard(QWidget):
     def emit_selection(self, widget, action, signal):
         if action in {"clear", "recover", "solo"}:
             current = widget.currentItem()
+            if action == "solo" and (current is None or not current.isSelected()):
+                return
             signal.emit(action, current.data(Qt.ItemDataRole.UserRole) if current else -1)
             return
         ids = [item.data(Qt.ItemDataRole.UserRole) for item in widget.selectedItems()]
@@ -236,6 +238,33 @@ class Preferences(QDialog):
             spin.setValue(workspace.get(key))
             form.addRow(self.tr(en, zh), spin)
             self.fields[key] = spin
+        annotation = QWidget()
+        annotation_form = QFormLayout(annotation)
+        tabs.addTab(annotation, self.tr("Annotation", "标注"))
+        width = QSpinBox(objectName="annotationDefaultWidth")
+        width.setRange(1, 48)
+        width.setValue(workspace.get("annotation_width"))
+        annotation_form.addRow(self.tr("Default stroke width", "默认线宽"), width)
+        self.fields["annotation_width"] = width
+        remember = QCheckBox(
+            self.tr("Remember the last settings for each tool", "记住各标注工具上次使用的设置"),
+            objectName="rememberAnnotationStyles",
+        )
+        remember.setChecked(workspace.get("remember_annotation_styles"))
+        annotation_form.addRow(remember)
+        self.fields["remember_annotation_styles"] = remember
+        annotation_hint = QLabel(self.tr(
+            "Tools without a saved width use the default width.",
+            "工具没有已保存的线宽时，使用默认线宽。",
+        ))
+        annotation_hint.setWordWrap(True)
+        annotation_form.addRow(annotation_hint)
+        self.clear_annotation_styles = QCheckBox(
+            self.tr("Clear saved tool styles when saving", "保存时清除各工具已记住的样式"),
+            objectName="clearAnnotationStyles",
+        )
+        self.clear_annotation_styles.setEnabled(bool(workspace.get("annotation_styles")))
+        annotation_form.addRow(self.clear_annotation_styles)
         output = QWidget()
         output_form = QFormLayout(output)
         tabs.addTab(output, self.tr("Output", "输出"))
@@ -349,6 +378,8 @@ class Preferences(QDialog):
             else:
                 data[key] = widget.text().strip()
         data["hotkeys"] = {key: field.text().strip() for key, field in self.shortcuts.items()}
+        if self.clear_annotation_styles.isChecked():
+            data["annotation_styles"] = {}
         for key, field in (("custom_commands", self.commands), ("editor_shortcuts", self.editor_shortcuts)):
             entries = {}
             for line in field.toPlainText().splitlines():

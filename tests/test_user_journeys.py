@@ -244,7 +244,8 @@ class UserJourneyTests(unittest.TestCase):
         self.until(lambda: app.editor is not None and app.editor.isVisible(), "Tray did not open the editor.")
         editor = app.editor
         start = QPoint(45, 54)
-        QTest.mouseMove(editor, start)
+        QTest.mouseMove(editor.windowHandle(), start)
+        self.qt.processEvents()
         QTest.keyClick(editor, Qt.Key.Key_Space)
         QTest.keyClick(editor, Qt.Key.Key_Right, Qt.KeyboardModifier.ControlModifier)
         QTest.keyClick(editor, Qt.Key.Key_Down, Qt.KeyboardModifier.ControlModifier)

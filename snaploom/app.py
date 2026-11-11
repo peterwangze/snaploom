@@ -332,7 +332,7 @@ class Application:
                 self.capture_completed("output", image, selection)
                 return
             suggest_windows = self.workspace.get("detect_windows") and not options.get("whiteboard")
-            editor_options = {
+            editor_options = self._annotation_options() | {
                 "locale": self.locale, "show_guides": self.workspace.get("show_grid"),
                 "show_magnifier": self.workspace.get("show_magnifier"),
                 "auto_detect": suggest_windows,
@@ -343,11 +343,11 @@ class Application:
                 "aspect_ratio": (tuple(options["size"]) if options.get("size") and options.get("keep_aspect_ratio") else None),
                 "detect_elements": detect_elements if suggest_windows else None,
                 "color_only": options.get("color_only", False),
-                "shortcuts": self.workspace.get("editor_shortcuts"),
             }
             windows = detect_windows() if suggest_windows else ()
             self.editor = CaptureEditor(snapshot, selection=selection, windows=windows, options=editor_options,
                                         history=self.workspace.regions())
+            self._connect_annotation_settings(self.editor)
             self.editor.completed.connect(self.capture_completed)
             self.editor.cancelled.connect(self.capture_cancelled)
             self.editor.refresh_requested.connect(self.refresh_capture)
@@ -361,6 +361,23 @@ class Application:
         except (OSError, RuntimeError, ValueError, ImportError, TypeError) as error:
             self.release_capture()
             self.failure(str(error), context.get("done"))
+
+    def _annotation_options(self):
+        return {
+            "annotation_width": self.workspace.get("annotation_width"),
+            "annotation_styles": self.workspace.get("annotation_styles")
+            if self.workspace.get("remember_annotation_styles") else {},
+            "shortcuts": self.workspace.get("editor_shortcuts"),
+        }
+
+    def _connect_annotation_settings(self, editor):
+        editor.annotation_width_changed.connect(lambda width: self.workspace.set("annotation_width", width))
+        editor.annotation_style_changed.connect(self._remember_annotation_style)
+
+    def _remember_annotation_style(self, tool, style):
+        if self.workspace.get("remember_annotation_styles"):
+            saved = self.workspace.get("annotation_styles")
+            self.workspace.set("annotation_styles", saved | {tool: style})
 
     def capture_selection(self, options, bounds):
         if options.get("rect"):
@@ -439,23 +456,10 @@ class Application:
                 image = shadowed(image)
             except (ValueError, RuntimeError) as error:
                 self.notify(str(error), error=True)
-        if action == "save" and not self.capture_context.get("options", {}).get("hold"):
-            editor = self.editor
-            if editor:
-                editor.hide()
-                try:
-                    target = self.save_dialog(image)
-                except (OSError, ValueError) as error:
-                    self.failure(str(error))
-                    target = None
-                if not target:
-                    editor.show()
-                    editor.activateWindow()
-                    return
-                context = self.release_capture()
-                self.last_region = QRect(rect)
-                self.output(image, "saved", rect, context.get("done"), target)
-                return
+        if (self.editor is not None and action in {"save", "quick-save", "copy-file", "print"}
+                and not options.get("recognition") and not (options.get("hold") and options.get("output"))):
+            self._complete_editor_output(action, image, rect)
+            return
         context = self.release_capture(restore_dashboard=action != "scroll")
         options = context.get("options", {})
         done = context.get("done")
@@ -476,6 +480,42 @@ class Application:
             self.scroll_capture(image, rect, done, restore_dashboard=context.get("dashboard", False))
             return
         self.output(image, action, rect, done)
+
+    def _complete_editor_output(self, action, image, rect):
+        editor = self.editor
+        if action in {"save", "print"}:
+            editor.hide()
+
+        def restore_editor():
+            if self.editor is editor:
+                editor.show()
+                editor.activateWindow()
+
+        def show_error(message):
+            if self.editor is editor:
+                restore_editor()
+                self.status(message)
+                QMessageBox.warning(editor, self.tr("Output could not be completed", "无法完成输出"), message)
+
+        def complete(code=0, text="", error=""):
+            if self.editor is not editor:
+                return
+            if code:
+                restore_editor()
+                return
+            context = self.release_capture()
+            self.last_region = QRect(rect)
+            done = context.get("done")
+            try:
+                history_action = "saved" if action == "save" else action
+                self._record_output(image, rect, history_action, already_saved=action in {"save", "quick-save"})
+            except (OSError, RuntimeError, ValueError) as error:
+                self.failure(str(error), done)
+                return
+            if done:
+                done(code=0, text=text)
+
+        self.output(image, action, rect, complete, record=False, on_error=show_error)
 
     def custom_output(self, name, image, rect):
         context = self.release_capture()
@@ -558,7 +598,7 @@ class Application:
 
         execute(0)
 
-    def output(self, image, action, rect=None, done=None, target=None, *, silent=False, record=True):
+    def output(self, image, action, rect=None, done=None, target=None, *, silent=False, record=True, on_error=None):
         rect = QRect(rect) if rect is not None else QRect()
         text = ""
         try:
@@ -606,16 +646,27 @@ class Application:
                     self.notify(self.tr(f"Saved to {target}", f"已保存至 {target}"))
                 if self.workspace.get("copy_after_save"):
                     self.copy_image(image)
-            elif record and action != "copy-file" and self.workspace.get("auto_save") and rect.isValid():
-                self.quick_save(image)
-            if record and rect.isValid():
-                self.workspace.remember(image, rect, action)
-                self.update_lists()
+            if record:
+                self._record_output(image, rect, action, already_saved=bool(target))
         except (OSError, RuntimeError, ValueError) as error:
-            self.failure(str(error), done)
+            if on_error is None:
+                self.failure(str(error), done)
+            else:
+                message = str(error)
+                on_error(message)
+                if done:
+                    done(code=1, error=message)
             return
         if done:
             done(code=0, text=text)
+
+    def _record_output(self, image, rect, action, *, already_saved):
+        if not rect.isValid():
+            return
+        if not already_saved and action != "copy-file" and self.workspace.get("auto_save"):
+            self.quick_save(image)
+        self.workspace.remember(image, rect, action)
+        self.update_lists()
 
     def print_image(self, image):
         from PySide6.QtGui import QPainter
@@ -703,13 +754,14 @@ class Application:
         if action == "recover":
             self.recover_pins()
             return
-        if action == "solo":
-            for item, window in self.pin_windows.items():
-                if window.state["group"] == self.group:
-                    self.pin_action("show" if item == pin_id else "hide", item)
-            return
         window = self.pin_windows.get(pin_id)
         if window is None:
+            return
+        if action == "solo":
+            for item, peer in self.pin_windows.items():
+                if item != pin_id and peer.state["group"] == window.state["group"]:
+                    self.pin_action("hide", item)
+            self.pin_action("show", pin_id)
             return
         if action in {"show", "delete"} and pin_id in self.closed_pins:
             self.closed_pins.remove(pin_id)
@@ -748,7 +800,9 @@ class Application:
 
             annotations = tuple(Annotation(**(item | {"points": tuple(map(tuple, item["points"]))}))
                                 for item in window.state.get("annotations", []))
-            dialog = ImageEditor(window.image, parent=window, locale=self.locale, annotations=annotations)
+            dialog = ImageEditor(window.image, parent=window, locale=self.locale, annotations=annotations,
+                                 options=self._annotation_options())
+            self._connect_annotation_settings(dialog.canvas)
             if action == "crop" and hasattr(dialog, "activate_crop"):
                 dialog.activate_crop()
             dialog.applied.connect(lambda updated: self.update_pin_image(
@@ -1023,7 +1077,8 @@ class Application:
         if action == "preview":
             from .editor import ImageEditor
 
-            dialog = ImageEditor(image, locale=self.locale)
+            dialog = ImageEditor(image, locale=self.locale, options=self._annotation_options())
+            self._connect_annotation_settings(dialog.canvas)
             dialog.applied.connect(lambda updated: self.open_pin(updated))
             self.keep_dialog(dialog)
         else:

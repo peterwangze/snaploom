@@ -4,14 +4,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from math import atan2, cos, hypot, pi, sin
 
-from PySide6.QtCore import QPoint, QPointF, QRunnable, QRect, QRectF, QSize, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRunnable, QRect, QRectF, QSize, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import (
     QColor, QCursor, QFont, QFontMetricsF, QIcon, QImage, QKeySequence, QPainter,
     QPainterPath, QPen, QPixmap, QPolygonF, QRegion, QShortcut, QTransform,
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
-    QFontDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QMenu, QScrollArea, QSpinBox,
+    QFontDialog, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QMenu, QScrollArea, QSpinBox,
     QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -40,6 +40,8 @@ DEFAULT_EDITOR_SHORTCUTS = {tool: key for tool, _, _, key in TOOLS} | {
     "copy-file": "Ctrl+Shift+C",
     "refresh": "F5",
     "color": "C",
+    "undo": "Ctrl+Z",
+    "redo": "Ctrl+Shift+Z",
 }
 REGION_TOOLS = {"rectangle", "ellipse", "mosaic", "blur", "redact", "erase", "magnify"}
 EFFECT_TOOLS = {"mosaic", "blur", "erase", "magnify"}
@@ -406,12 +408,59 @@ def _native_tool_icon(tool, color):
     return QIcon(pixmap)
 
 
+class AnnotationSpinBox(QSpinBox):
+    input_finished = Signal()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setKeyboardTracking(False)
+        self.lineEdit().installEventFilter(self)
+
+    def event(self, event):
+        if event.type() == QEvent.Type.MouseButtonPress:
+            self._activate_input_window()
+        return self._handle_key_event(event) or super().event(event)
+
+    def eventFilter(self, watched, event):
+        if watched is self.lineEdit():
+            if event.type() == QEvent.Type.MouseButtonPress:
+                self._activate_input_window()
+            if self._handle_key_event(event):
+                return True
+        return super().eventFilter(watched, event)
+
+    def _activate_input_window(self):
+        window = self.window()
+        if window.windowType() == Qt.WindowType.Tool and not window.isActiveWindow():
+            window.activateWindow()
+
+    def _handle_key_event(self, event):
+        if event.type() == QEvent.Type.ShortcutOverride and event.key() not in {
+            Qt.Key.Key_Tab, Qt.Key.Key_Backtab,
+        }:
+            event.accept()
+            return True
+        if event.type() != QEvent.Type.KeyPress or event.key() not in {
+            Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape,
+        }:
+            return False
+        if event.key() == Qt.Key.Key_Escape:
+            self.lineEdit().setText(f"{self.prefix()}{self.textFromValue(self.value())}{self.suffix()}")
+        else:
+            self.interpretText()
+        event.accept()
+        self.input_finished.emit()
+        return True
+
+
 class CaptureEditor(QWidget):
     completed = Signal(str, QImage, QRect)
     cancelled = Signal()
     refresh_requested = Signal()
     custom_output = Signal(str, QImage, QRect)
     color_copied = Signal(str)
+    annotation_style_changed = Signal(str, dict)
+    annotation_width_changed = Signal(int)
     _elements_detected = Signal(int, object)
 
     def __init__(self, snapshot, *, selection=None, windows=(), options=None, history=(), parent=None):
@@ -457,8 +506,15 @@ class CaptureEditor(QWidget):
         self.working_annotations = None
         self.points = []
         self.line_points = []
+        self._line_redo = []
         self.tool = "select"
         self.document = AnnotationDocument(_read_option(options, "_annotations", ()))
+        width = _read_option(options, "annotation_width", 3)
+        self.annotation_width = min(48, max(1, width)) if isinstance(width, int) else 3
+        styles = _read_option(options, "annotation_styles", {})
+        self.annotation_styles = {
+            tool: dict(style) for tool, style in styles.items() if isinstance(style, Mapping)
+        } if isinstance(styles, Mapping) else {}
         self._number_series = ""
         self._next_numbers = {"": 1}
         for item in self.document.annotations:
@@ -490,12 +546,12 @@ class CaptureEditor(QWidget):
             action: QKeySequence.fromString(str(custom_shortcuts.get(action, default)), QKeySequence.SequenceFormat.PortableText)
             for action, default in DEFAULT_EDITOR_SHORTCUTS.items()
         }
-        self._bind_shortcuts()
         if self._embedded:
             self.setFixedSize(snapshot.geometry.size())
         else:
             self.setGeometry(snapshot.geometry)
         self.toolbar = self._build_toolbar()
+        self._bind_shortcuts()
         if selection is not None and not self.color_only:
             self.selection = self._local_rect(selection)
         self._place_toolbar()
@@ -511,6 +567,7 @@ class CaptureEditor(QWidget):
             tool: lambda name=tool: self._set_tool(name) if not self.selection.isEmpty() and not self.crop_mode else None
             for tool, _, _, _ in TOOLS
         }
+        actions.update(undo=self._undo, redo=self._redo)
         if not self._embedded:
             actions |= {
                 action: lambda name=action: self._complete(name)
@@ -520,16 +577,18 @@ class CaptureEditor(QWidget):
             actions["color"] = self._copy_color
         if self.color_only:
             actions = {"color": self._copy_color, "refresh": self.refresh_requested.emit}
-        bindings = {}
+        keys = set()
+        self._floating_shortcuts = []
         for action in actions:
             sequence = self._shortcut_sequences[action]
-            if sequence.isEmpty() or sequence.toString() in bindings:
+            if sequence.isEmpty() or sequence.toString() in keys:
                 continue
-            shortcut = QShortcut(sequence, self)
-            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            shortcut.activated.connect(actions[action])
-            bindings[sequence.toString()] = shortcut
-        self._bound_shortcuts = bindings
+            keys.add(sequence.toString())
+            QShortcut(sequence, self, actions[action])
+            if not self._embedded:
+                shortcut = QShortcut(sequence, self.toolbar, actions[action])
+                shortcut.setEnabled(False)
+                self._floating_shortcuts.append(shortcut)
 
     @staticmethod
     def _aspect_value(value):
@@ -549,8 +608,14 @@ class CaptureEditor(QWidget):
         button.setCheckable(checkable)
         button.clicked.connect(callback)
         button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
-        row.addWidget(button)
+        if row is not None:
+            row.addWidget(button)
         return button
+
+    def _focus_canvas(self):
+        if not self._embedded and self.toolbar.isWindow():
+            self.activateWindow()
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _build_toolbar(self):
         toolbar = QFrame(self)
@@ -573,27 +638,28 @@ class CaptureEditor(QWidget):
         layout = QVBoxLayout(toolbar)
         layout.setContentsMargins(7, 6, 7, 6)
         layout.setSpacing(4)
-        tools_row = QHBoxLayout()
-        tools_row.setSpacing(0)
-        layout.addLayout(tools_row)
+        self._tool_grid = QGridLayout()
+        self._tool_grid.setSpacing(0)
+        layout.addLayout(self._tool_grid)
         self.tool_buttons = {}
-        for key, english, chinese, _ in TOOLS:
+        for index, (key, english, chinese, _) in enumerate(TOOLS):
             button = self._button(
-                tools_row, self._label(english, chinese), lambda checked=False, name=key: self._set_tool(name),
+                None, self._label(english, chinese), lambda checked=False, name=key: self._set_tool(name),
                 icon=_native_tool_icon(key, QColor("#f3f7ff")), shortcut=self._shortcut_label(key), checkable=True,
             )
             self.tool_buttons[key] = button
+            self._tool_grid.addWidget(button, 0, index, Qt.AlignmentFlag.AlignLeft)
+        self._tool_columns = len(self.tool_buttons)
         self.tool_buttons["select"].setChecked(True)
         controls = QHBoxLayout()
         controls.setSpacing(3)
         layout.addLayout(controls)
         self.color_button = self._button(controls, self._label("Color", "颜色"), self._choose_color)
         self._update_color_button()
-        self.stroke_width = QSpinBox(toolbar)
+        self.stroke_width = AnnotationSpinBox(toolbar)
         self.stroke_width.setRange(1, 48)
-        self.stroke_width.setValue(3)
-        self.stroke_width.setPrefix(self._label("Width ", "粗细 "))
-        self.stroke_width.setAccessibleName(self._label("Stroke width or effect strength", "线宽或效果强度"))
+        self.stroke_width.setValue(self.annotation_width)
+        self.stroke_width.input_finished.connect(self._focus_canvas)
         self.stroke_width.valueChanged.connect(self._style_changed)
         controls.addWidget(self.stroke_width)
         self.fill = QCheckBox(self._label("Fill", "填充"), toolbar)
@@ -603,30 +669,50 @@ class CaptureEditor(QWidget):
         self.style.setAccessibleName(self._label("Annotation style", "标注样式"))
         self.style.currentIndexChanged.connect(self._style_changed)
         controls.addWidget(self.style)
+        controls.addStretch()
+        numbering = QHBoxLayout()
+        numbering.setSpacing(3)
+        layout.addLayout(numbering)
         self.number_group = QComboBox(toolbar)
         self.number_group.setAccessibleName(self._label("Numbering series", "编号分组"))
-        controls.addWidget(self.number_group)
+        self.number_group.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.number_group.setMinimumContentsLength(9)
+        numbering.addWidget(self.number_group)
         self._fill_number_groups()
         self.number_group.currentIndexChanged.connect(self._change_number_group)
-        self.number_spin = QSpinBox(toolbar)
+        self.number_spin = AnnotationSpinBox(toolbar)
         self.number_spin.setRange(1, 9999)
         self.number_spin.setPrefix(self._label("Next ", "下一号 "))
         self.number_spin.setValue(self._next_numbers[self._number_series])
         self.number_spin.setAccessibleName(self._label("Next step number", "下一步骤序号"))
+        self.number_spin.input_finished.connect(self._focus_canvas)
         self.number_spin.valueChanged.connect(self._change_next_number)
-        controls.addWidget(self.number_spin)
-        controls.addStretch()
-        self.undo_button = self._button(controls, self._label("Undo", "撤销"), self._undo, shortcut="Ctrl+Z")
-        self.redo_button = self._button(controls, self._label("Redo", "重做"), self._redo, shortcut="Ctrl+Shift+Z")
+        numbering.addWidget(self.number_spin)
+        numbering.addStretch()
+        history = QHBoxLayout()
+        history.setSpacing(3)
+        layout.addLayout(history)
+        if not self._embedded:
+            self.dimensions = QLabel(toolbar)
+            self.dimensions.setAccessibleName(self._label("Selection dimensions", "选区尺寸"))
+            history.addWidget(self.dimensions)
+        history.addStretch()
+        undo_key = self._shortcut_label("undo")
+        redo_key = self._shortcut_label("redo")
+        self.undo_button = self._button(history, self._label("Undo step", "撤销一步"), self._undo)
+        self.undo_button.setToolTip(self._label(
+            f"Undo the last annotation action ({undo_key})", f"撤销最近一次标注操作（{undo_key}）",
+        ))
+        self.redo_button = self._button(history, self._label("Redo step", "重做一步"), self._redo)
+        self.redo_button.setToolTip(self._label(
+            f"Redo the last undone annotation action ({redo_key})", f"重做最近撤销的一次标注操作（{redo_key}）",
+        ))
         self.undo_button.setEnabled(False)
         self.redo_button.setEnabled(False)
         if not self._embedded:
             actions = QHBoxLayout()
             actions.setSpacing(3)
             layout.addLayout(actions)
-            self.dimensions = QLabel(toolbar)
-            self.dimensions.setAccessibleName(self._label("Selection dimensions", "选区尺寸"))
-            actions.addWidget(self.dimensions)
             actions.addStretch()
             copy_button = self._button(
                 actions, self._label("Copy", "复制"), lambda: self._complete("copy"),
@@ -635,7 +721,7 @@ class CaptureEditor(QWidget):
             copy_button.setObjectName("copyCapture")
             self._button(actions, self._label("Pin", "贴图"), lambda: self._complete("pin"), shortcut=self._shortcut_label("pin"))
             self._button(actions, self._label("Save", "保存"), lambda: self._complete("save"), shortcut=self._shortcut_label("save"))
-            more = self._button(actions, self._label("More ▾", "更多 ▾"), lambda: None)
+            more = self._button(actions, self._label("More", "更多"), lambda: None)
             more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
             more.setMenu(self._output_menu(more))
             self._button(actions, self._label("Cancel", "取消"), self.close, shortcut="Esc")
@@ -681,30 +767,45 @@ class CaptureEditor(QWidget):
             self._place_toolbar()
             self.update()
 
+    def _fit_tool_grid(self, width):
+        button_width = max(button.sizeHint().width() for button in self.tool_buttons.values())
+        columns = max(1, min(len(self.tool_buttons), (width - 18) // button_width))
+        if columns == self._tool_columns:
+            return
+        self._tool_columns = columns
+        for index, button in enumerate(self.tool_buttons.values()):
+            self._tool_grid.removeWidget(button)
+            row, column = divmod(index, columns)
+            self._tool_grid.addWidget(button, row, column, Qt.AlignmentFlag.AlignLeft)
+
     def _place_toolbar(self):
         if self._embedded:
             return
         if self.selection.isEmpty() or self.color_only or self.drag_mode in {"region", "resize", "move"}:
             self.toolbar.hide()
             return
-        self.toolbar.adjustSize()
-        screen = QApplication.screenAt(self.selected_geometry().bottomRight())
+        screen = QApplication.screenAt(self.selected_geometry().bottomRight()) or QApplication.primaryScreen()
+        available = screen.availableGeometry().translated(-self.snapshot.geometry.topLeft()) if screen else self.rect()
+        area = available.intersected(self.rect())
+        if area.isEmpty():
+            area = self.rect()
+        self._fit_tool_grid(area.width() - 8)
+        self.toolbar.layout().invalidate()
+        hint = self.toolbar.sizeHint()
         floating = screen is not None and (
-            self.toolbar.width() > self.width() - 8 or self.toolbar.height() > self.height() - 8
+            hint.width() > area.width() - 8 or hint.height() > area.height() - 8
         )
+        if floating:
+            area = available
+            self._fit_tool_grid(area.width() - 8)
         if floating != self.toolbar.isWindow():
             self.toolbar.setWindowFlags(
                 Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
                 if floating else Qt.WindowType.Widget
             )
-            self.toolbar.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, floating)
-            self.toolbar.adjustSize()
-        if floating:
-            area = screen.availableGeometry().translated(-self.snapshot.geometry.topLeft())
-        else:
-            area = self._local_rect(screen.geometry()) if screen is not None else self.rect()
-        if area.isEmpty():
-            area = self.rect()
+            for shortcut in self._floating_shortcuts:
+                shortcut.setEnabled(floating)
+        self.toolbar.resize(self.toolbar.sizeHint())
         x = max(area.left() + 4, min(self.selection.right() - self.toolbar.width(), area.right() - self.toolbar.width() - 3))
         below = self.selection.bottom() + 8
         above = self.selection.top() - self.toolbar.height() - 7
@@ -764,11 +865,13 @@ class CaptureEditor(QWidget):
             else:
                 screen = QApplication.screenAt(self.mapToGlobal(self.position))
                 self._set_selection(self._local_rect(screen.geometry()) if screen is not None else self.rect())
+        if self.line_points:
+            self._finish_line()
         image = self.export_image()
         if image.isNull():
             return
         geometry = self.selected_geometry()
-        if action == "save" and not custom:
+        if action in {"save", "quick-save", "copy-file", "print"} and not custom:
             self.completed.emit(action, image, geometry)
             return
         self.finished = True
@@ -838,44 +941,64 @@ class CaptureEditor(QWidget):
 
     def _update_controls(self):
         selected = self._selected_annotation()
-        tool = selected.tool if selected is not None and self.tool == "select" else self.tool
+        tool = selected.tool if selected is not None else self.tool
+        settings = self.annotation_styles.get(tool, {})
         controls = (self.style, self.stroke_width, self.fill)
         for control in controls:
             control.blockSignals(True)
-        previous_style = self.style.currentData()
         self.style.clear()
         styles = self._styles(tool)
         for value, english, chinese in styles:
             self.style.addItem(self._label(english, chinese), value)
-        chosen = selected.style if selected is not None else previous_style
+        chosen = selected.style if selected is not None else settings.get("style")
         self.style.setCurrentIndex(max(0, self.style.findData(chosen)))
         self.style.setVisible(len(styles) > 1)
         self.fill.setVisible(tool in {"rectangle", "ellipse"})
         self.number_group.setVisible(tool == "number")
         self.number_spin.setVisible(tool == "number")
-        self.color_button.setEnabled(tool not in EFFECT_TOOLS and tool != "select")
-        self.stroke_width.setEnabled(tool != "select")
-        if selected is not None:
-            self.color = selected.color
-            self.stroke_width.setValue(selected.width)
-            self.fill.setChecked(selected.fill)
-            self._update_color_button()
+        self.color_button.setVisible(tool not in {"select", "mosaic", "blur", "erase"})
+        width = selected.width if selected is not None else settings.get("width", self.annotation_width)
+        self.stroke_width.setValue(width if isinstance(width, int) else self.annotation_width)
+        self.stroke_width.setEnabled(len(self.selected_items) <= 1)
+        self.fill.setChecked(selected.fill if selected is not None else settings.get("fill") is True)
+        color = selected.color if selected is not None else settings.get("color", DEFAULT_COLOR)
+        self.color = color if isinstance(color, str) and QColor(color).isValid() else DEFAULT_COLOR
+        self._update_color_button()
+        self._update_width_control(tool)
         for control in controls:
             control.blockSignals(False)
-        self.undo_button.setEnabled(bool(self.document.undo_history))
-        self.redo_button.setEnabled(bool(self.document.redo_history))
+        self._update_history_buttons()
         self._place_toolbar()
+
+    def _update_width_control(self, tool):
+        names = {
+            "select": ("Default width", "默认线宽"),
+            "mosaic": ("Mosaic strength", "马赛克强度"),
+            "blur": ("Blur strength", "模糊强度"),
+            "text": ("Text size", "文字大小"),
+            "number": ("Number size", "编号大小"),
+        }
+        label = self._label(*names.get(tool, ("Width", "线宽")))
+        self.stroke_width.setPrefix(f"{label} ")
+        self.stroke_width.setSuffix(" px" if tool not in names or tool == "select" else "")
+        self.stroke_width.setAccessibleName(label)
+        uses_width = tool not in {"erase", "redact"} and (
+            tool != "marker" or self.style.currentData() == "default"
+        )
+        self.stroke_width.setVisible(uses_width)
 
     def _set_tool(self, tool):
         if self.line_points:
             self._finish_line()
+        elif tool != "line":
+            self._line_redo.clear()
         self.tool = tool
         if tool != "select":
             self.selected_items.clear()
         for name, button in self.tool_buttons.items():
             button.setChecked(name == tool)
         self._update_controls()
-        self.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._focus_canvas()
         self.update()
 
     def _update_color_button(self):
@@ -892,18 +1015,32 @@ class CaptureEditor(QWidget):
             self.color = color.name(QColor.NameFormat.HexArgb)
             self._update_color_button()
             self._style_changed()
-        self.setFocus()
+        self._focus_canvas()
 
     def _style_changed(self, *_):
         selected = self._selected_annotation()
-        if self.tool == "select" and selected is not None:
+        style = {
+            "color": self.color,
+            "width": self.stroke_width.value(),
+            "fill": self.fill.isChecked(),
+            "style": self.style.currentData() or "default",
+        }
+        if selected is not None:
             updated = list(self.document.annotations)
             index = next(iter(self.selected_items))
-            updated[index] = replace(
-                selected, color=self.color, width=self.stroke_width.value(),
-                fill=self.fill.isChecked(), style=self.style.currentData() or "default",
-            )
+            updated[index] = replace(selected, **style)
             self._commit(updated)
+        elif self.tool == "select":
+            if style["width"] != self.annotation_width:
+                self.annotation_width = style["width"]
+                self.annotation_width_changed.emit(self.annotation_width)
+        elif self.annotation_styles.get(self.tool) != style:
+            self.annotation_styles[self.tool] = style
+            self.annotation_style_changed.emit(self.tool, style)
+        tool = selected.tool if selected is not None else self.tool
+        if tool == "marker":
+            self._update_width_control(tool)
+            self._place_toolbar()
         self.update()
 
     def _change_next_number(self, value):
@@ -997,22 +1134,35 @@ class CaptureEditor(QWidget):
     def _commit(self, annotations):
         self.document.commit(annotations)
         self._render_key = None
-        self.undo_button.setEnabled(bool(self.document.undo_history))
-        self.redo_button.setEnabled(bool(self.document.redo_history))
+        self._update_history_buttons()
         self.update()
 
+    def _update_history_buttons(self):
+        self.undo_button.setEnabled(bool(self.line_points or self.document.undo_history))
+        self.redo_button.setEnabled(bool(self._line_redo or self.document.redo_history))
+
     def _undo(self):
-        self.document.undo()
-        self.selected_items.clear()
-        self._render_key = None
-        self._update_controls()
+        if self.line_points:
+            self._line_redo.append(self.line_points.pop())
+            self._update_history_buttons()
+        else:
+            self.document.undo()
+            self.selected_items.clear()
+            self._render_key = None
+            self._update_controls()
+        self._focus_canvas()
         self.update()
 
     def _redo(self):
-        self.document.redo()
-        self.selected_items.clear()
-        self._render_key = None
-        self._update_controls()
+        if self._line_redo and not self.document.redo_history:
+            self.line_points.append(self._line_redo.pop())
+            self._update_history_buttons()
+        else:
+            self.document.redo()
+            self.selected_items.clear()
+            self._render_key = None
+            self._update_controls()
+        self._focus_canvas()
         self.update()
 
     def _make_annotation(self, points, *, text=""):
@@ -1026,6 +1176,8 @@ class CaptureEditor(QWidget):
         if len(self.line_points) > 1:
             self._commit((*self.document.annotations, self._make_annotation(self.line_points)))
         self.line_points.clear()
+        self._line_redo.clear()
+        self._update_history_buttons()
         self.update()
 
     def _edit_text(self, point, item=None):
@@ -1106,7 +1258,7 @@ class CaptureEditor(QWidget):
             menu.addAction(self._label("Rotate selected right", "向右旋转所选"), lambda: self._rotate_selected(15))
             menu.addAction(self._label("Delete selected annotations", "删除所选标注"), self._remove_selected)
         if self.document.annotations:
-            menu.addAction(self._label("Clear all annotations", "清空标注"), self._clear_annotations)
+            menu.addAction(self._label("Clear all annotations", "清空全部标注"), self._clear_annotations)
         return menu
 
     def _edit_number(self, item):
@@ -1345,7 +1497,10 @@ class CaptureEditor(QWidget):
                 self.number_spin.setValue(min(9999, next_number + 1))
                 return
             if self.tool == "line":
+                self._line_redo.clear()
+                self.document.redo_history.clear()
                 self.line_points.append(point)
+                self._update_history_buttons()
                 self.update()
                 return
             self.drag_mode = "annotation"
@@ -1518,9 +1673,23 @@ class CaptureEditor(QWidget):
         key_code = Qt.Key
         control = bool(mods & Qt.KeyboardModifier.ControlModifier)
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        focus = QApplication.focusWidget()
+        if focus is not None and self.toolbar.isAncestorOf(focus):
+            if key == key_code.Key_Escape:
+                self._focus_canvas()
+                return
+            if key in {key_code.Key_Return, key_code.Key_Enter}:
+                if isinstance(focus, QToolButton):
+                    focus.click()
+                elif isinstance(focus, QComboBox):
+                    focus.showPopup()
+                return
+            return super().keyPressEvent(event)
         if key == key_code.Key_Escape:
-            if self.line_points:
+            if self.line_points or self._line_redo:
                 self.line_points.clear()
+                self._line_redo.clear()
+                self._update_history_buttons()
                 self.update()
             elif self._embedded:
                 super().keyPressEvent(event)
@@ -1530,10 +1699,13 @@ class CaptureEditor(QWidget):
         if self.color_only and key in {key_code.Key_Return, key_code.Key_Enter}:
             self._copy_color()
             return
-        if event.matches(QKeySequence.StandardKey.Undo):
+        pressed = QKeySequence(event.keyCombination())
+        if not self.color_only and pressed == self._shortcut_sequences["undo"]:
             self._undo()
             return
-        if event.matches(QKeySequence.StandardKey.Redo) or (control and key == key_code.Key_Y):
+        if not self.color_only and (pressed == self._shortcut_sequences["redo"] or (
+            control and key == key_code.Key_Y and not self._shortcut_sequences["redo"].isEmpty()
+        )):
             self._redo()
             return
         if key in {key_code.Key_Delete, key_code.Key_Backspace} and self.selected_items:
@@ -1846,7 +2018,7 @@ class ImageEditor(QDialog):
 
     applied = Signal(QImage)
 
-    def __init__(self, image, *, parent=None, locale="en", annotations=()):
+    def __init__(self, image, *, parent=None, locale="en", annotations=(), options=None):
         super().__init__(parent)
         self.result_image = QImage(image)
         self.result_base = QImage(image)
@@ -1854,11 +2026,10 @@ class ImageEditor(QDialog):
         self.snapshot = _StaticSnapshot(image)
         self.canvas = CaptureEditor(
             self.snapshot, selection=self.snapshot.geometry,
-            options={"_embedded": True, "_annotations": annotations, "locale": locale},
+            options={**(options or {}), "_embedded": True, "_annotations": annotations, "locale": locale},
         )
         self.setWindowTitle(self.canvas._label("Annotate image", "标注图像"))
         self.setAccessibleName(self.windowTitle())
-        self.resize(850, 650)
         layout = QVBoxLayout(self)
         layout.addWidget(self.canvas.toolbar, alignment=Qt.AlignmentFlag.AlignHCenter)
         viewport = QScrollArea(self)
@@ -1873,6 +2044,17 @@ class ImageEditor(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        screen = self.screen()
+        size = screen.availableGeometry().size() - QSize(24, 48) if screen else QSize(850, 650)
+        size = size.boundedTo(QSize(850, 650))
+        self.canvas._fit_tool_grid(size.width() - layout.contentsMargins().left() - layout.contentsMargins().right())
+        self.resize(size)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.layout() is not None:
+            margins = self.layout().contentsMargins()
+            self.canvas._fit_tool_grid(self.width() - margins.left() - margins.right())
 
     def activate_crop(self):
         self.canvas.crop_mode = True

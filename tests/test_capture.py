@@ -60,10 +60,13 @@ class NativeDesktopTests(unittest.TestCase):
         palette.setColor(QPalette.ColorRole.Window, QColor("#e32191"))
         window.setPalette(palette)
         window.setAutoFillBackground(True)
-        window.setGeometry(QRect(screen.geometry().topLeft() + QPoint(40, 40), QSize(160, 100)))
+        bounds = QRect(QPoint(), QSize(160, 100))
+        bounds.moveCenter(screen.availableGeometry().center())
+        window.setGeometry(bounds)
         window.show()
         window.raise_()
         try:
+            self.assertTrue(QTest.qWaitForWindowExposed(window, 2000))
             point = window.geometry().center()
             expected = QColor("#e32191")
             for _ in range(8):
