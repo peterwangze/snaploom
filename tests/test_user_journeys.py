@@ -191,7 +191,7 @@ class UserJourneyTests(unittest.TestCase):
         self.capture_menu_action(editor, "Copy image as file", "复制为文件")
         link, = self.qt.clipboard().mimeData().urls()
         copied = Path(link.toLocalFile())
-        self.assertEqual(copied.parent, self.folder)
+        self.assertTrue(copied.parent.samefile(self.folder))
         self.assertNotEqual(copied, quick_save)
         self.assertEqual(QImage(str(copied)).size(), self.selection.size())
         self.assertEqual(self.application.workspace.regions(), [self.selection, self.selection])
@@ -215,7 +215,7 @@ class UserJourneyTests(unittest.TestCase):
     def test_cancel_capture_restores_dashboard_and_previously_visible_pins(self):
         app = self.application
         self.qt.clipboard().setText("Keep this text")
-        self.click(self.button(app.dashboard, "Paste or restore a pin", "贴图或恢复"))
+        self.click(self.button(app.dashboard, "Paste or restore pin", "贴图或恢复"))
         pin, = app.pin_windows.values()
         app.workspace.set("hide_pins_on_capture", True)
         editor = self.open_capture()
@@ -310,7 +310,7 @@ class UserJourneyTests(unittest.TestCase):
     def test_clipboard_pin_can_be_hidden_restored_and_reopened_after_restart(self):
         app = self.application
         self.qt.clipboard().setImage(self.image.copy(QRect(0, 0, 280, 90)))
-        paste = self.button(app.dashboard, "Paste or restore a pin", "贴图或恢复")
+        paste = self.button(app.dashboard, "Paste or restore pin", "贴图或恢复")
         button_point = paste.mapToGlobal(paste.rect().center())
         self.click(paste)
         pin_id, = app.pin_windows
@@ -341,7 +341,7 @@ class UserJourneyTests(unittest.TestCase):
             with self.subTest(action=en):
                 app = self.application
                 self.qt.clipboard().setText(f"Reference for {en}")
-                paste = self.button(app.dashboard, "Paste or restore a pin", "贴图或恢复")
+                paste = self.button(app.dashboard, "Paste or restore pin", "贴图或恢复")
                 previous = set(app.pin_windows)
                 self.click(paste)
                 pin_id, = app.pin_windows.keys() - previous
