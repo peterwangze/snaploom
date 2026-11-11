@@ -1,10 +1,36 @@
 # Snaploom
 
-Snaploom 是面向 Windows、macOS 和 Linux 的桌面截图工具。按 **F1** 选区，按 **Enter** 复制，按 **F3** 把剪贴板内容贴在桌面上。截图、标注、历史和贴图管理可从托盘或主窗口打开。
+**框选屏幕上的内容，就地标注，再复制或贴到桌面。**
+
+用 Snaploom 把问题截图发给同事、把示例悬浮在正在操作的窗口旁，或从屏幕上提取可编辑的文字。支持 Windows、macOS 和 Linux，安装包自带运行环境和中英文 OCR 模型。
+
+[下载最新离线版](https://github.com/peterwangze/snaploom/releases/latest) · [选择安装包](#离线安装)
+
+![Snaploom 的截图编辑器，选区中有编号和箭头，工具栏提供复制、贴图和保存。](docs/images/capture-editor.png)
+
+## 用 Snaploom 完成日常工作
+
+### 发一张一眼能看懂的截图
+
+按 **F1** 拖出选区，用箭头指出问题、用编号排好操作顺序，再用实色遮盖挡住敏感内容。拖动边框或按方向键可以微调选区，标注也可以选中、移动或撤销。按 **Enter** 复制结果，直接粘贴到聊天或文档。需要留档时点「保存」。
+
+### 把参考图留在手边
+
+截图后点「贴图」，或复制一张图、一段文字、一个色值，再按 **F3** 把它变成悬浮窗口。对照设计稿、表格或操作步骤时，可以拖动贴图、用滚轮缩放，或按住 **Ctrl／⌘** 滚动调整不透明度。按 **Shift + F3** 可一键显示或隐藏贴图。贴图可分组，默认在重启后恢复，移到屏幕外也能从托盘找回。
+
+### 从图片里取文字，把长页面拼成一张
+
+框选内容后点「更多 → 提取文字」，即可在本机识别中英文并复制结果。同一菜单也能识别条形码或二维码。想截下超出一屏的页面时，选「滚动截图」，回到原窗口向下滚动一小段，再点「添加下一帧」。Snaploom 会匹配画面重叠部分，拼好后可以复制、保存或贴图。
+
+## 适合反复使用的细节
+
+- **重复截图省去重新画框。** 按 **Shift + F1** 重用上次选区，适合记录同一个界面的前后变化。也可以预设尺寸和延时，截下悬停菜单。Windows 高分屏上的单屏选区按物理像素导出。
+- **快捷键和按钮都能开始。** 托盘和主窗口可直接发起截图或贴图，主窗口还提供当前窗口、当前屏幕、所有屏幕和白板。全局快捷键可改，注册失败会提示。
+- **自己决定留下什么。** 自动保存和下载剪贴板网址图片默认关闭。截图历史可调整条数，设为 **0** 即禁用并清理已有记录。贴图单独保存在本机。
 
 ## 离线安装
 
-登录有仓库权限的 GitHub 账号后，从 [Releases](https://github.com/peterwangze/snaploom/releases) 下载对应架构的包。安装包包含应用运行时和中英文 OCR 模型。
+登录有仓库权限的 GitHub 账号后，按系统和处理器选择文件。发布页随包提供 SHA-256 校验文件。
 
 | 系统 | 安装包 | 便携包 |
 | --- | --- | --- |
@@ -14,29 +40,27 @@ Snaploom 是面向 Windows、macOS 和 Linux 的桌面截图工具。按 **F1** 
 | Linux x64，glibc 2.35+ | `*-linux-x64-setup.run` | `*-linux-x64.tar.gz` |
 | Linux ARM64，glibc 2.39+ | `*-linux-arm64-setup.run` | `*-linux-arm64.tar.gz` |
 
-Linux 安装可在普通用户的终端执行 `sh Snaploom-版本-linux-架构-setup.run`。需要系统已有可用的图形桌面和相应的图形库。macOS 需要授予屏幕录制权限，Wayland 由系统截图门户请求权限。每个版本的发布页提供 SHA-256 和签名状态。
+Windows 安装包未签名。macOS 使用临时签名，尚未公证，截图需要屏幕录制权限。Linux 在普通用户的终端执行 `sh Snaploom-版本-linux-架构-setup.run`，需要图形桌面及系统图形库。Wayland 上的截图和全局快捷键取决于系统门户。 [首次启动说明](https://github.com/peterwangze/snaploom/releases/latest) · [平台兼容性与验收记录](docs/release-verification.md)
 
-## 日常操作
+## 进阶用法
 
-- **截图**。从 F1、托盘或主窗口开始，拖动选择区域。窗口候选可用 Tab 切换，箭头键微调选区。主窗口也提供当前屏幕、全部屏幕、当前窗口、重复选区、延时和白板入口。
-- **标注**。截图工具栏提供形状、箭头、画笔、荧光笔、文字、序号、马赛克、模糊、实色遮盖和局部放大。输出支持复制、保存、贴图、复制为文件、打印和自定义命令。
-- **贴图**。F3 从剪贴板贴图。图片、文本、富文本、色值和本地图片文件均可作为输入。拖动移动，滚轮缩放，Ctrl/Cmd 加滚轮调整不透明度，双击隐藏。托盘可恢复离屏贴图或解除鼠标穿透。
-- **识别与长截图**。截图工具栏的「更多」提供离线 OCR、二维码和条码识别。滚动截图逐帧采集并匹配重叠部分，找不到足够重叠时可缩短滚动距离重试。
-- **本地数据**。在设置中把历史条数改成 0 即可禁用历史并清理已有条目。贴图单独保存在本地。自动保存和下载剪贴板网址图像默认关闭。
+### 命令行自动化
 
-在「设置 → 输出」选择云端 OCR 后，主动发起识别会向所选服务发送这次的图像。OCR.space 从环境变量 `SNAPLOOM_OCR_SPACE_KEY` 读取凭据。腾讯云读取 `TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY` 和可选的 `TENCENTCLOUD_REGION`。本机识别无需凭据。
-
-## 命令行
-
-Windows 用 `Snaploom-cli.exe`，macOS 用应用包的 `Contents/MacOS/Snaploom`，Linux 用包内的 `Snaploom`。从源码执行 `python run_snaploom.py` 也使用相同的参数。
+可从脚本截取固定区域、同时保存并复制，或直接把文字贴到桌面。以下命令使用源码入口。安装后可用 Windows 的 `Snaploom-cli.exe`、macOS 应用包内的 `Contents/MacOS/Snaploom` 或 Linux 包内的 `Snaploom`。
 
 ```sh
-snaploom --help
-snaploom snip --full --block -o ./screen.png
-snaploom snip --area 20 20 800 600 --hold -o "quick-save;clipboard"
-snaploom paste --plain "Reference" --pos 160 90
-snaploom ocr ./screen.png --block
+python run_snaploom.py snip --full --block -o ./screen.png
+python run_snaploom.py snip --area 20 20 800 600 --hold -o "quick-save;clipboard"
+python run_snaploom.py paste --plain "Reference" --pos 160 90
+python run_snaploom.py ocr ./screen.png --block
 ```
+
+<details>
+<summary>配置可选的云端 OCR</summary>
+
+在「设置 → 输出」选择云端 OCR 后，主动发起识别会向所选服务发送本次图像。OCR.space 从环境变量 `SNAPLOOM_OCR_SPACE_KEY` 读取凭据。腾讯云读取 `TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY` 和可选的 `TENCENTCLOUD_REGION`。
+
+</details>
 
 ## 开发与验证
 
@@ -47,4 +71,4 @@ python -m unittest discover -s tests -v
 python run_snaploom.py --smoke-test-ocr
 ```
 
-构建入口见 [打包说明](packaging/README.md)。项目的参考范围和平台验收目标见 [Snipaste 调研](docs/snipaste-research.md) 与 [产品设计](docs/product-plan.md)。各平台最终验证范围见 [交付验收记录](docs/release-verification.md)。
+构建和测试细节见 [打包说明](packaging/README.md)。功能对照、设计取舍和已知差异见 [Snipaste 调研](docs/snipaste-research.md) · [产品设计](docs/product-plan.md) · [交付验收记录](docs/release-verification.md)。
