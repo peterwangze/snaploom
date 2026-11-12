@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QSize, Qt, Signal
-from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton,
@@ -29,6 +29,32 @@ EDITOR_ACTIONS = {
     "color": ("Copy pixel color", "复制像素颜色"), "undo": ("Undo step", "撤销一步"),
     "redo": ("Redo step", "重做一步"),
 }
+
+
+class WorkspaceList(QListWidget):
+    open_requested = Signal(int)
+    delete_requested = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.itemDoubleClicked.connect(self.open_item)
+
+    def open_item(self, item):
+        self.open_requested.emit(item.data(Qt.ItemDataRole.UserRole))
+
+    def keyPressEvent(self, event):
+        if event.modifiers() in {Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.KeypadModifier}:
+            if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+                item = self.currentItem()
+                if item is not None and item.isSelected():
+                    self.open_item(item)
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Delete:
+                self.delete_requested.emit()
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
 
 class Dashboard(QWidget):
@@ -61,15 +87,15 @@ class Dashboard(QWidget):
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
         self.tabs.addTab(self.home(), self.tr("Capture", "截图"))
-        self.history_list = QListWidget()
-        self.pin_list = QListWidget()
+        self.history_list = WorkspaceList()
+        self.pin_list = WorkspaceList()
         self._history_rows = None
         self._list_wide_actions = {}
         self.pin_list.setIconSize(QSize(56, 40))
         self.history_list.setAccessibleName(self.tr("Screenshot history", "截图历史"))
         self.pin_list.setAccessibleName(self.tr("Pinned references", "贴图"))
-        self.history_list.itemActivated.connect(lambda item: self.history_action.emit("preview", item.data(Qt.ItemDataRole.UserRole)))
-        self.pin_list.itemActivated.connect(lambda item: self.pin_action.emit("show", item.data(Qt.ItemDataRole.UserRole)))
+        self.history_list.open_requested.connect(lambda item_id: self.history_action.emit("preview", item_id))
+        self.pin_list.open_requested.connect(lambda item_id: self.pin_action.emit("show", item_id))
         history_page = self.list_page(self.history_list, [
             ("preview", "Preview", "预览"), ("copy", "Copy", "复制"), ("pin", "Pin", "贴图"),
             ("save", "Save", "保存"), ("delete", "Delete", "删除"), ("clear", "Clear history…", "清空历史…"),
@@ -181,9 +207,7 @@ class Dashboard(QWidget):
                 update_enabled()
             row.addWidget(button)
         layout.addLayout(row)
-        delete_key = QShortcut(QKeySequence(Qt.Key.Key_Delete), widget)
-        delete_key.setContext(Qt.ShortcutContext.WidgetShortcut)
-        delete_key.activated.connect(lambda: self.emit_selection(widget, "delete", signal))
+        widget.delete_requested.connect(lambda: self.emit_selection(widget, "delete", signal))
         return page
 
     def emit_selection(self, widget, action, signal):

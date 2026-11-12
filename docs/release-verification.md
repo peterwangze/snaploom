@@ -56,7 +56,7 @@
 
 升级后，旧版隐藏记录在首次恢复时按创建顺序从新到旧排列。之后隐藏的贴图按实际隐藏时间恢复。
 
-## 1.0.5 功能与交互走查
+## 1.0.6 功能与交互走查
 
 | 用户入口 | 预期与回归场景 |
 | --- | --- |
@@ -70,7 +70,7 @@
 | 历史与隐私 | 保存选中记录，刷新列表时继续操作同一条记录。Enter 打开预览，预览中的「新建悬浮贴图」明确说明结果。覆盖历史复制、保存、贴图、删除和取消清空。减少历史上限时确认实际将删除的条数。 |
 | 全局与编辑器快捷键 | 分开显示每项当前绑定，可留空或恢复默认。测试无效键、重复键、全局与编辑器冲突、Windows 系统占用时保留旧绑定、保存和取消。 |
 
-Windows 和 Linux X11 的原生桌面测试及各架构的打包冒烟检查见 [v1.0.5 构建](https://github.com/peterwangze/snaploom/actions/workflows/release.yml?query=branch%3Av1.0.5)。macOS 屏幕录制授权和 Linux Wayland 合成器行为仍待相应登录会话实测。
+Windows 和 Linux X11 的原生桌面测试及各架构的打包冒烟检查见 [v1.0.6 构建](https://github.com/peterwangze/snaploom/actions/workflows/release.yml?query=branch%3Av1.0.6)。macOS 屏幕录制授权和 Linux Wayland 合成器行为仍待相应登录会话实测。
 
 ## 发布包的环境边界
 

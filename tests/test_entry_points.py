@@ -329,14 +329,12 @@ class DashboardEntryPointTests(unittest.TestCase):
             self.app.command(arguments(["snip", "--full", "--cursor"]))
             self.wait_for_capture()
             editor = self.app.editor
-            QTest.keyClick(editor, Qt.Key.Key_F5)
-            self.assertFalse(editor.isVisible())
-            self.wait_until(editor.isVisible)
+            self.click_capture_menu_item(editor, "Refresh screenshot", "刷新截图")
+            self.wait_until(lambda: capture.call_count == 2 and editor.isVisible())
             self.assertEqual(editor.export_image().pixelColor(20, 20), QColor("#386ef2"))
             self.assertEqual(self.app.dashboard.status.text(), "Desktop capture temporarily unavailable")
-            QTest.keyClick(editor, Qt.Key.Key_F5)
-            self.assertFalse(editor.isVisible())
-            self.wait_until(editor.isVisible)
+            self.click_capture_menu_item(editor, "Refresh screenshot", "刷新截图")
+            self.wait_until(lambda: capture.call_count == 3 and editor.isVisible())
             windows.assert_not_called()
 
         self.assertEqual([call.kwargs for call in capture.call_args_list], [{"include_cursor": True}] * 3)
