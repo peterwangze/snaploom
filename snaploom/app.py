@@ -721,8 +721,11 @@ class Application:
                         done(code=1, error="Save cancelled.")
                     return
                 if action == "copy-file":
+                    url = QUrl.fromLocalFile(str(target))
                     mime = QMimeData()
-                    mime.setUrls([QUrl.fromLocalFile(str(target))])
+                    mime.setUrls([url])
+                    if sys.platform.startswith("linux"):
+                        mime.setData("x-special/gnome-copied-files", QByteArray(b"copy\n") + url.toEncoded())
                     self.qt.clipboard().setMimeData(mime)
             elif action in {"quick-save", "silent"}:
                 target = self.quick_save(image)

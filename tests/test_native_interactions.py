@@ -1,9 +1,14 @@
 """Verify capture editor interactions on the live desktop."""
 
+import json
 import os
+import sys
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from time import monotonic
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRect, QSize, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QProcess, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyle, QStyleFactory, QStyleOptionSpinBox
@@ -15,6 +20,59 @@ from snaploom.hotkeys import LABELS, Hotkeys
 
 @unittest.skipUnless(os.environ.get("SNAPLOOM_TEST_DESKTOP") == "1", "needs a live test desktop")
 class DesktopSelectionTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "linux", "exercises Linux file clipboard interoperability")
+    def test_copy_file_publishes_both_clipboard_formats_to_another_process(self):
+        from snaploom.app import Application
+
+        qt = QApplication.instance() or QApplication([])
+        if qt.platformName() != "xcb":
+            self.skipTest("requires the native X11 clipboard")
+
+        reader = """
+import json
+from PySide6.QtGui import QGuiApplication
+
+qt = QGuiApplication([])
+mime = qt.clipboard().mimeData()
+print(json.dumps({
+    "urls": [url.toLocalFile() for url in mime.urls()],
+    "gnome": bytes(mime.data("x-special/gnome-copied-files")).decode("ascii"),
+}))
+"""
+        with TemporaryDirectory() as directory:
+            folder = Path(directory).resolve()
+            app = Application(qt, folder, testing=True)
+            process = QProcess()
+            try:
+                app.workspace.set("save_folder", str(folder))
+                app.workspace.set("save_pattern", "截图 示例")
+                image = QImage(16, 12, QImage.Format.Format_RGB32)
+                image.fill(Qt.GlobalColor.white)
+                app.output(image, "copy-file", silent=True, record=False, prompt_file=False)
+                target = folder / "截图 示例.png"
+                self.assertEqual(QImage(str(target)).size(), image.size())
+
+                process.start(sys.executable, ["-c", reader])
+                self.assertTrue(process.waitForStarted(5000), process.errorString())
+                deadline = monotonic() + 10
+                while process.state() != QProcess.ProcessState.NotRunning and monotonic() < deadline:
+                    QTest.qWait(20)  # The clipboard owner must process X11 selection requests.
+                self.assertEqual(process.state(), QProcess.ProcessState.NotRunning, "Clipboard reader timed out")
+                stderr = bytes(process.readAllStandardError()).decode("utf-8", errors="replace")
+                self.assertEqual(process.exitStatus(), QProcess.ExitStatus.NormalExit, stderr)
+                self.assertEqual(process.exitCode(), 0, stderr)
+                data = json.loads(bytes(process.readAllStandardOutput()))
+                self.assertEqual(data["urls"], [str(target)])
+                self.assertEqual(data["gnome"], "copy\n" + target.as_uri())
+            finally:
+                if process.state() != QProcess.ProcessState.NotRunning:
+                    process.kill()
+                    process.waitForFinished(2000)
+                qt.clipboard().clear()
+                app.dashboard.deleteLater()
+                app.shutdown()
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
     @unittest.skipUnless(os.name == "nt", "requires Win32 global shortcut registration")
     def test_each_windows_global_shortcut_dispatches_and_releases_its_registration(self):
         import ctypes

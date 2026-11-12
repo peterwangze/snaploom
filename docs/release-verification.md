@@ -106,6 +106,12 @@ Windows 可从仓库根目录执行 `./.github/scripts/test-editor-matrix.ps1` �
 
 文件选择同时覆盖 Qt 对话框和受控的保存结果。打开系统文件管理器的调用通过替身核对目标目录。
 
+## 1.0.10 Linux 文件剪贴板
+
+「另存为并复制文件」同时提供标准文件 URL 和旧版 GNOME 文件管理器读取的复制格式。Linux x64 与 ARM64 的 X11 回归使用独立进程读取剪贴板，核对带中文与空格的文件名、图像和编码后的文件 URL。 [Nautilus 42.6 剪贴板实现](https://github.com/GNOME/nautilus/blob/42.6/src/nautilus-clipboard.c#L60-L114)
+
+Windows 已通过原生保存对话框验证文件名输入、JPEG 写入和生成的文件 URL。macOS 通过离线包安装与启动检查。
+
 ## 发布包的环境边界
 
 - Windows x64 离线安装通过 Inno Setup，提供安装和免安装两种形式。当前包无 Authenticode 签名。
