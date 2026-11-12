@@ -101,6 +101,8 @@ jobs:
           SNAPLOOM_TEST_DESKTOP=1 xvfb-run -a python -m pytest -q tests/test_capture.py tests/test_native_interactions.py
       - name: Build and verify offline installer
         if: runner.os != 'Linux'
+        env:
+          SNAPLOOM_TEST_DESKTOP: '1'
         run: python packaging/build.py --smoke
       - name: Build and verify Linux offline installer
         if: runner.os == 'Linux'

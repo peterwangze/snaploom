@@ -875,6 +875,54 @@ class DashboardEntryPointTests(unittest.TestCase):
                 self.assertTrue(self.app.dashboard.isVisible())
         self.assertEqual([record[3] for record in self.app.workspace.history()], ["pin"])
 
+    def test_relaunch_and_capture_request_reveal_scrolling_capture_until_cancelled(self):
+        desktop = self.image(540, 390, "#386ef2")
+        editor = self.open_capture("All displays", "所有屏幕", desktop)
+
+        def capture_frame(**_options):
+            self.assertFalse(dialog.isVisible())
+            self.assertFalse(self.app.dashboard.isVisible())
+            return Snapshot(desktop, desktop.rect())
+
+        capture = self.enterContext(patch("snaploom.capture.capture_desktop", side_effect=capture_frame))
+        self.click_capture_menu_item(editor, "Scrolling capture", "滚动截图")
+        dialog, = self.app.dialogs
+        self.assertIs(self.app.scroll_dialog, dialog)
+        self.assertFalse(self.app.dashboard.isVisible())
+
+        with patch.object(dialog, "raise_", wraps=dialog.raise_) as raise_dialog:
+            self.app.command(arguments([]))
+            raise_dialog.assert_called_once_with()
+            self.assertFalse(self.app.dashboard.isVisible())
+
+            self.app.show_dashboard()
+            self.click_button("Capture region", "区域截图")
+            self.assertEqual(raise_dialog.call_count, 2)
+            self.assertIsNone(self.app.editor)
+            self.assertIn(self.app.tr("cancel the scrolling capture", "完成或取消滚动截图"),
+                          self.app.dashboard.status.text())
+
+            # A re-entry during the pending frame must leave both app windows out of the capture.
+            self.app.dashboard.hide()
+            self.click_button("Add next frame", "添加下一帧", parent=dialog)
+            self.assertFalse(dialog.isVisible())
+            self.app.command(arguments([]))
+            self.app.action("capture")
+            self.assertFalse(dialog.isVisible())
+            self.assertEqual(raise_dialog.call_count, 2)
+            self.wait_until(lambda: capture.called and dialog.isVisible())
+
+        self.click_button("Cancel", "取消", parent=dialog)
+        self.assertIsNone(self.app.scroll_dialog)
+        self.assertFalse(self.app.capturing)
+        self.assertTrue(self.app.dashboard.isVisible())
+        editor = self.open_capture("Capture region", "区域截图", desktop)
+        start, end = QPoint(40, 35), QPoint(155, 125)
+        QTest.mousePress(editor.windowHandle(), Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(editor.windowHandle(), end)
+        QTest.mouseRelease(editor.windowHandle(), Qt.MouseButton.LeftButton, pos=end)
+        self.assertEqual(editor.selected_geometry(), QRect(start, end))
+
     def test_recognition_busy_no_result_and_success_keep_selection_available(self):
         desktop = self.image(800, 520, "#386ef2")
         editor = self.open_capture("All displays", "所有屏幕", desktop)

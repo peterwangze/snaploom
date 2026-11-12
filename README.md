@@ -4,25 +4,25 @@
 
 用 Snaploom 把问题截图发给同事、把示例悬浮在正在操作的窗口旁，或从屏幕上提取可编辑的文字。支持 Windows、macOS 和 Linux，安装包自带运行环境和中英文 OCR 模型。
 
-## 下载 v1.0.10 离线包
+## 下载 v1.0.11 离线包
 
 ### Windows
 
-- **x64（Windows 10 / 11）** · [安装版（EXE）](https://github.com/peterwangze/snaploom/releases/download/v1.0.10/Snaploom-1.0.10-windows-x64-setup.exe) · [免安装版（ZIP）](https://github.com/peterwangze/snaploom/releases/download/v1.0.10/Snaploom-1.0.10-windows-x64-portable.zip)
+- **x64（Windows 10 / 11）** · [安装版（EXE）](https://github.com/peterwangze/snaploom/releases/download/v1.0.11/Snaploom-1.0.11-windows-x64-setup.exe) · [免安装版（ZIP）](https://github.com/peterwangze/snaploom/releases/download/v1.0.11/Snaploom-1.0.11-windows-x64-portable.zip)
 
 ### macOS 13 及以上
 
-- **Apple Silicon（ARM64）** · [安装版（DMG）](https://github.com/peterwangze/snaploom/releases/download/v1.0.10/Snaploom-1.0.10-macos-arm64.dmg)
-- **Intel（x64）** · [安装版（DMG）](https://github.com/peterwangze/snaploom/releases/download/v1.0.10/Snaploom-1.0.10-macos-x64.dmg)
+- **Apple Silicon（ARM64）** · [安装版（DMG）](https://github.com/peterwangze/snaploom/releases/download/v1.0.11/Snaploom-1.0.11-macos-arm64.dmg)
+- **Intel（x64）** · [安装版（DMG）](https://github.com/peterwangze/snaploom/releases/download/v1.0.11/Snaploom-1.0.11-macos-x64.dmg)
 
 两种架构均通过 DMG 分发。打开后可将 Snaploom 拖入「应用程序」或所需位置。
 
 ### Linux
 
-- **x64（glibc 2.35+）** · [安装版（RUN）](https://github.com/peterwangze/snaploom/releases/download/v1.0.10/Snaploom-1.0.10-linux-x64-setup.run) · [免安装版（TAR.GZ）](https://github.com/peterwangze/snaploom/releases/download/v1.0.10/Snaploom-1.0.10-linux-x64.tar.gz)
-- **ARM64（glibc 2.39+）** · [安装版（RUN）](https://github.com/peterwangze/snaploom/releases/download/v1.0.10/Snaploom-1.0.10-linux-arm64-setup.run) · [免安装版（TAR.GZ）](https://github.com/peterwangze/snaploom/releases/download/v1.0.10/Snaploom-1.0.10-linux-arm64.tar.gz)
+- **x64（glibc 2.35+）** · [安装版（RUN）](https://github.com/peterwangze/snaploom/releases/download/v1.0.11/Snaploom-1.0.11-linux-x64-setup.run) · [免安装版（TAR.GZ）](https://github.com/peterwangze/snaploom/releases/download/v1.0.11/Snaploom-1.0.11-linux-x64.tar.gz)
+- **ARM64（glibc 2.39+）** · [安装版（RUN）](https://github.com/peterwangze/snaploom/releases/download/v1.0.11/Snaploom-1.0.11-linux-arm64-setup.run) · [免安装版（TAR.GZ）](https://github.com/peterwangze/snaploom/releases/download/v1.0.11/Snaploom-1.0.11-linux-arm64.tar.gz)
 
-[安装说明](#离线安装) · [SHA-256 校验文件](https://github.com/peterwangze/snaploom/releases/download/v1.0.10/SHA256SUMS.txt) · [历史版本](https://github.com/peterwangze/snaploom/releases)
+[安装说明](#离线安装) · [SHA-256 校验文件](https://github.com/peterwangze/snaploom/releases/download/v1.0.11/SHA256SUMS.txt) · [历史版本](https://github.com/peterwangze/snaploom/releases)
 
 ![Snaploom 的截图编辑器，选区中有编号和箭头，工具栏提供复制、贴图和保存。](docs/images/capture-editor.png)
 
@@ -50,7 +50,7 @@
 
 ### 从图片里取文字，把长页面拼成一张
 
-框选内容后点「更多 → 提取文字」，即可在本机识别中英文并复制结果。同一菜单也能识别条形码或二维码。关闭结果窗口后还可以继续标注或保存原截图。想截下超出一屏的页面时，选「滚动截图」，回到原窗口向下滚动一小段，再点「添加下一帧」。Snaploom 会匹配画面重叠部分，拼好后可以复制、保存或贴图。
+框选内容后点「更多 → 提取文字」，即可在本机识别中英文并复制结果。同一菜单也能识别条形码或二维码。关闭结果窗口后还可以继续标注或保存原截图。想截下超出一屏的页面时，选「滚动截图」，回到原窗口向下滚动一小段，再点「添加下一帧」。Snaploom 会匹配画面重叠部分，拼好后可以复制、保存或贴图。滚动截图中再次按 **F1** 会回到滚动面板，点「取消」即可结束本次滚动截图。
 
 ## 适合反复使用的细节
 
@@ -61,11 +61,11 @@
 
 ## 离线安装
 
-- **Windows** 运行 EXE 安装，或解压 ZIP 后运行 `Snaploom.exe`。安装包未签名。
+- **Windows** 运行 EXE 安装，或解压 ZIP 后运行 `Snaploom.exe`。升级前请先完成或取消正在进行的截图，再从系统托盘退出 Snaploom。安装包未签名。
 - **macOS** 打开对应架构的 DMG 后拖出 Snaploom。应用使用临时签名，尚未公证，截图需要屏幕录制权限。
-- **Linux** 在普通用户的终端执行 `sh Snaploom-1.0.10-linux-架构-setup.run` 安装，或解压 TAR.GZ 后运行 `Snaploom/Snaploom`。需要图形桌面及系统图形库。Wayland 上的截图和全局快捷键取决于系统门户。
+- **Linux** 在普通用户的终端执行 `sh Snaploom-1.0.11-linux-架构-setup.run` 安装，或解压 TAR.GZ 后运行 `Snaploom/Snaploom`。需要图形桌面及系统图形库。Wayland 上的截图和全局快捷键取决于系统门户。
 
-[首次启动说明](https://github.com/peterwangze/snaploom/releases/tag/v1.0.10) · [平台兼容性与验收记录](docs/release-verification.md)
+[首次启动说明](https://github.com/peterwangze/snaploom/releases/tag/v1.0.11) · [平台兼容性与验收记录](docs/release-verification.md)
 
 ## 进阶用法
 

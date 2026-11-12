@@ -174,6 +174,14 @@ def package_windows(work, frozen, icon, notices, release, basename, verify):
             smoke(command_line)
             run(command_line, "--version", timeout=30)
             smoke(installed / executable.name, "--smoke-test")
+            if os.environ.get("SNAPLOOM_TEST_DESKTOP") == "1":
+                environment = os.environ | {
+                    "QT_QPA_PLATFORM": "windows",
+                    "SNAPLOOM_PACKAGED_WINDOWS_CLI": str(command_line),
+                    "SNAPLOOM_PACKAGED_WINDOWS_SETUP": str(setup),
+                }
+                run(sys.executable, "-m", "pytest", "-q", "tests/test_packaged_windows_capture.py",
+                    env=environment, timeout=120)
         finally:
             uninstaller = installed / "unins000.exe"
             if uninstaller.is_file():

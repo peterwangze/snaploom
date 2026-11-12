@@ -112,6 +112,11 @@ Windows 可从仓库根目录执行 `./.github/scripts/test-editor-matrix.ps1` �
 
 Windows 已通过原生保存对话框验证文件名输入、JPEG 写入和生成的文件 URL。macOS 通过离线包安装与启动检查。
 
+## 1.0.11 滚动截图与 Windows 升级
+
+- 滚动截图期间重复启动和重新发起截图，会返回原滚动面板。验收覆盖添加下一帧时的短暂隐藏、取消滚动后重新框选，以及保存和贴图后退出滚动会话。
+- Windows 发布流程用安装后的 `Snaploom-cli.exe` 从真实桌面取图，检查 PNG 的物理像素尺寸和测试图案，并用独立工作区检查安装程序遇到仍在运行的实例时的行为。
+
 ## 发布包的环境边界
 
 - Windows x64 离线安装通过 Inno Setup，提供安装和免安装两种形式。当前包无 Authenticode 签名。

@@ -63,6 +63,7 @@ class Application:
         self.dashboard.files_dropped.connect(self.open_files)
         self.dashboard.closing.connect(self.close_dashboard)
         self.editor = None
+        self.scroll_dialog = None
         self.capturing = False
         self.capture_context = {}
         self.pin_windows = {}
@@ -269,6 +270,14 @@ class Application:
             self.qt.quit()
 
     def capture(self, options, done=None):
+        if self.scroll_dialog is not None:
+            message = self.tr("Finish or cancel the scrolling capture to start a new screenshot.",
+                              "请先完成或取消滚动截图，再开始新的截图。")
+            self.status(message)
+            self.raise_scroll_capture()
+            if done:
+                done(code=1, error=message)
+            return
         if self.editor is not None or self.capturing:
             self.failure(self.tr("Finish the current capture first.", "请先完成当前截图。"), done)
             return
@@ -1339,6 +1348,12 @@ class Application:
         layout.addWidget(buttons)
         self.keep_dialog(dialog)
 
+    def raise_scroll_capture(self):
+        dialog = self.scroll_dialog
+        if dialog is not None and dialog.isVisible():
+            dialog.raise_()
+            dialog.activateWindow()
+
     def scroll_capture(self, initial, region, done, *, restore_dashboard=False, hidden_pins=()):
         from .capture import CaptureError, capture_desktop
 
@@ -1347,6 +1362,7 @@ class Application:
         current = initial
         initial_dpr = initial.devicePixelRatio()
         dialog = QDialog(None, Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
+        self.scroll_dialog = dialog
         dialog.setWindowTitle(self.tr("Scrolling capture", "滚动截图"))
         layout = QVBoxLayout(dialog)
         note = QLabel(self.tr("Scroll down a little in the source window, then add the next frame.",
@@ -1362,7 +1378,9 @@ class Application:
         save = QPushButton(self.tr("Save As…", "另存为…"))
         copy = QPushButton(self.tr("Copy", "复制"))
         pin = QPushButton(self.tr("Pin", "贴图"))
-        for button in (add, save, copy, pin):
+        cancel = QPushButton(self.tr("Cancel", "取消"))
+        cancel.setAccessibleName(self.tr("Cancel scrolling capture", "取消滚动截图"))
+        for button in (add, save, copy, pin, cancel):
             buttons.addWidget(button)
         layout.addLayout(buttons)
         dialog.resize(440, 122)
@@ -1409,6 +1427,7 @@ class Application:
             self.output(current, action, region, complete, dialog_parent=dialog, on_error=status.setText)
 
         def close_scroll(result):
+            self.scroll_dialog = None
             self.capturing = False
             self.restore_capture_pins(hidden_pins)
             if restore_dashboard or not QSystemTrayIcon.isSystemTrayAvailable():
@@ -1420,6 +1439,7 @@ class Application:
         save.clicked.connect(lambda: finish("save"))
         copy.clicked.connect(lambda: finish("copy"))
         pin.clicked.connect(lambda: finish("pin"))
+        cancel.clicked.connect(dialog.reject)
         dialog.finished.connect(close_scroll)
         self.keep_dialog(dialog)
 
@@ -1638,6 +1658,8 @@ class Application:
             self.qt.quit()
         elif command in {"settings", "history", "quit"}:
             self.action(command)
+        elif command is None and not data.get("background") and self.scroll_dialog is not None:
+            self.raise_scroll_capture()
         elif not data.get("background") and (not self.workspace.get("start_hidden") or not QSystemTrayIcon.isSystemTrayAvailable()):
             self.show_dashboard()
         if done:
