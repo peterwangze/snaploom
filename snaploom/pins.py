@@ -10,6 +10,11 @@ from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QImage, QMo
 from PySide6.QtWidgets import QApplication, QColorDialog, QInputDialog, QMenu, QToolButton, QWidget
 
 
+MIN_ZOOM, MAX_ZOOM = 0.06, 8.0
+MIN_DISPLAY_EXTENT, MAX_DISPLAY_EXTENT = 20, 8192
+THUMBNAIL_EXTENT = 132
+
+
 class PinWindow(QWidget):
     changed = Signal()
     dismissed = Signal(bool)
@@ -130,7 +135,9 @@ class PinWindow(QWidget):
             on_screen = visible.intersected(QRect(self.mapFromGlobal(bounds.topLeft()), bounds.size()))
             if not on_screen.isEmpty():
                 visible = on_screen
-        size = min(24, visible.width(), visible.height())
+        extent = min(visible.width(), visible.height())
+        # Leave a draggable area on pins close to their minimum size.
+        size = min(24, max(12, extent - 8), extent)
         x = max(visible.left(), visible.right() - size - 2)
         y = min(visible.top() + 3, visible.bottom() - size + 1)
         self.dismiss_button.setGeometry(x, y, size, size)
@@ -190,13 +197,23 @@ class PinWindow(QWidget):
             return self.view.copy(self.thumbnail_crop.intersected(self.view.rect()))
         return self.view
 
-    def update_size(self):
-        size = self.display_image().size() / max(1.0, self.view.devicePixelRatio())
-        factor = self.state["zoom"]
+    def logical_display_size(self):
+        return self.display_image().size() / max(1.0, self.view.devicePixelRatio())
+
+    def display_zoom_limit(self, size):
         if self.state["thumbnail"]:
-            factor = min(factor, 132 / max(1, size.width(), size.height()))
-        self.resize(QSize(max(20, min(8192, round(size.width() * factor))),
-                          max(20, min(8192, round(size.height() * factor)))))
+            return min(MAX_ZOOM, THUMBNAIL_EXTENT / max(1, size.width(), size.height()))
+        return MAX_ZOOM
+
+    @staticmethod
+    def bound_display_extent(value):
+        return max(MIN_DISPLAY_EXTENT, min(MAX_DISPLAY_EXTENT, round(value)))
+
+    def update_size(self):
+        size = self.logical_display_size()
+        factor = min(self.state["zoom"], self.display_zoom_limit(size))
+        self.resize(QSize(self.bound_display_extent(size.width() * factor),
+                          self.bound_display_extent(size.height() * factor)))
         self.update()
 
     def recover_position(self):
@@ -383,7 +400,7 @@ class PinWindow(QWidget):
             self.zoom(self.state["zoom"] * (1.12 ** step))
 
     def zoom(self, factor):
-        self.set_state("zoom", min(8.0, max(0.06, factor)))
+        self.set_state("zoom", min(MAX_ZOOM, max(MIN_ZOOM, factor)))
 
     def reset(self):
         self.state.update({"zoom": 1.0, "opacity": 100, "thumbnail": False})
@@ -508,11 +525,16 @@ class PinWindow(QWidget):
         menu.addAction(self.tr("Delete pin", "删除贴图"), lambda: self.dismissed.emit(True))
 
     def width_dialog(self):
+        size = self.logical_display_size()
+        native_width = max(1, size.width())
+        limit = self.display_zoom_limit(size)
+        minimum = self.bound_display_extent(native_width * min(MIN_ZOOM, limit))
+        maximum = self.bound_display_extent(native_width * limit)
         width, ok = QInputDialog.getInt(self, self.tr("Display size", "显示尺寸"),
                                         self.tr("Width (logical pixels)", "宽度（逻辑像素）"),
-                                        self.width(), 20, 8192)
+                                        self.width(), minimum, maximum)
         if ok:
-            self.zoom(width * self.view.devicePixelRatio() / max(1, self.view.width()))
+            self.zoom(width / native_width)
 
     def background_dialog(self):
         color = QColorDialog.getColor(QColor(self.state["background"] or "#ffffff"), self,

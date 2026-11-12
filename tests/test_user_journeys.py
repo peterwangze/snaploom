@@ -8,8 +8,8 @@ from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF,
 from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QDialogButtonBox, QLabel, QMessageBox, QPushButton, QSpinBox,
-    QSystemTrayIcon, QTextEdit, QToolButton,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QLabel, QMessageBox, QPushButton, QSpinBox,
+    QSystemTrayIcon, QTabWidget, QTextEdit, QToolButton,
 )
 
 from snaploom.app import Application
@@ -44,7 +44,8 @@ class UserJourneyTests(unittest.TestCase):
 
     def start_application(self):
         self.application = Application(self.qt, self.folder, testing=True)
-        self.application.workspace.set("save_folder", str(self.folder))
+        if not self.application.workspace.get("save_folder"):
+            self.application.workspace.set("save_folder", str(self.folder))
         self.application.show_dashboard()
         self.qt.processEvents()
 
@@ -80,9 +81,14 @@ class UserJourneyTests(unittest.TestCase):
         label = self.application.tr(en, zh)
         return next(button for button in parent.findChildren(widget) if button.text() == label and button.isVisible())
 
-    @staticmethod
-    def click(button):
-        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    def click(self, widget, point=None):
+        point = widget.rect().center() if point is None else point
+        window = widget.window()
+        local = window.mapFromGlobal(widget.mapToGlobal(point))
+        hit = window.childAt(local) or window
+        self.assertTrue(hit is widget or widget.isAncestorOf(hit),
+                        f"Click at {local} hit {type(hit).__name__}, expected {type(widget).__name__}.")
+        QTest.mouseClick(window.windowHandle(), Qt.MouseButton.LeftButton, pos=local)
 
     @staticmethod
     def drag(widget, start, end):
@@ -103,13 +109,46 @@ class UserJourneyTests(unittest.TestCase):
 
     def select_tab(self, index):
         tabs = self.application.dashboard.tabs
-        QTest.mouseClick(tabs.tabBar(), Qt.MouseButton.LeftButton, pos=tabs.tabBar().tabRect(index).center())
+        self.click(tabs.tabBar(), tabs.tabBar().tabRect(index).center())
         self.assertEqual(tabs.currentIndex(), index)
 
     def capture_menu_action(self, editor, en, zh):
-        menu = next(button.menu() for button in editor.toolbar.findChildren(QToolButton) if button.menu() is not None)
-        action = next(action for action in menu.actions() if action.text() == self.application.tr(en, zh))
-        action.trigger()
+        more = next(button for button in editor.toolbar.findChildren(QToolButton) if button.menu() is not None)
+        menu = more.menu()
+        failures = []
+
+        def choose():
+            try:
+                self.choose_menu_item(menu, en, zh)
+            except Exception as error:
+                failures.append(error)
+                menu.hide()
+
+        menu.aboutToShow.connect(lambda: QTimer.singleShot(0, choose), Qt.ConnectionType.SingleShotConnection)
+        self.click(more)
+        if failures:
+            raise failures[0]
+
+    def choose_menu_item(self, menu, en, zh):
+        label = self.application.tr(en, zh)
+        item = next(action for action in menu.actions() if action.text() == label)
+        self.assertTrue(item.isEnabled() and menu.isVisible())
+        point = menu.actionGeometry(item).center()
+        self.assertIs(menu.actionAt(point), item)
+        for _ in menu.actions():
+            if menu.activeAction() is item:
+                break
+            QTest.keyClick(menu.windowHandle(), Qt.Key.Key_Down)
+        self.assertIs(menu.activeAction(), item)
+        QTest.keyClick(menu.windowHandle(), Qt.Key.Key_Return)
+
+    def tray_item(self, en, zh):
+        menu = self.application.tray_menu
+        menu.popup(self.qt.primaryScreen().availableGeometry().topLeft() + QPoint(20, 20))
+        try:
+            self.choose_menu_item(menu, en, zh)
+        finally:
+            menu.hide()
 
     def test_tray_click_opens_workspace_and_capture_is_explicit(self):
         app = self.application
@@ -119,10 +158,106 @@ class UserJourneyTests(unittest.TestCase):
                 app.tray.activated.emit(reason)
                 self.assertTrue(app.dashboard.isVisible())
             capture.assert_not_called()
-            label = app.tr("Capture region", "区域截图")
-            action = next(action for action in app.tray_menu.actions() if action.text() == label)
-            action.trigger()
+            self.tray_item("Capture region", "区域截图")
             capture.assert_called_once_with({})
+
+    def test_each_workspace_button_and_tray_item_reaches_its_command(self):
+        app = self.application
+        common = (
+            ("Capture region", "区域截图", "capture"), ("Current display", "当前屏幕", "screen"),
+            ("All displays", "所有屏幕", "full"), ("Active window", "当前窗口", "active"),
+            ("Size and delay…", "尺寸与延时…", "custom"), ("Whiteboard…", "白板…", "whiteboard"),
+            ("Open image…", "打开图像…", "open"), ("Restore last hidden pin", "恢复最近隐藏的贴图", "restore-last-pin"),
+            ("Show or hide pins", "显示或隐藏贴图", "toggle_pins"),
+            ("Help", "操作帮助", "help"), ("Settings", "设置", "settings"),
+        )
+        workspace = (*common, ("Repeat last region", "重复上次区域", "repeat"))
+        tray = (
+            *common, ("Open Snaploom", "打开 Snaploom", "dashboard"), ("Repeat last capture", "重复上次区域", "repeat"),
+            ("Pin clipboard content", "悬浮剪贴板内容", "paste"), ("Recover off-screen pins", "找回屏幕外贴图", "recover"),
+            ("Disable click-through for all pins", "关闭所有贴图的鼠标穿透", "no-click-through"),
+            ("History", "历史", "history"), ("Quit", "退出", "quit"),
+        )
+        expected_buttons = {app.tr(en, zh) for en, zh, _ in workspace} | {app.tr("Pin clipboard content", "悬浮剪贴板内容")}
+        self.assertEqual({button.text() for button in app.dashboard.findChildren(QPushButton) if button.isVisible()},
+                         expected_buttons)
+        self.assertEqual({item.text() for item in app.tray_menu.actions() if not item.isSeparator() and item.menu() is None},
+                         {app.tr(en, zh) for en, zh, _ in tray})
+        with patch.object(app, "action") as dispatch, patch.object(app, "paste") as paste:
+            for en, zh, command in workspace:
+                with self.subTest(surface="workspace", command=command):
+                    self.click(self.button(app.dashboard, en, zh))
+                    dispatch.assert_called_once_with(command)
+                    dispatch.reset_mock()
+            self.click(self.button(app.dashboard, "Pin clipboard content", "悬浮剪贴板内容"))
+            paste.assert_called_once()
+            self.assertTrue(app.dashboard.screen().availableGeometry().contains(paste.call_args.args[0]))
+            for en, zh, command in tray:
+                with self.subTest(surface="tray", command=command):
+                    self.tray_item(en, zh)
+                    dispatch.assert_called_once_with(command)
+                    dispatch.reset_mock()
+
+    def test_open_image_button_handles_cancel_and_opens_selected_files(self):
+        app = self.application
+        target = self.folder / "reference.png"
+        self.assertTrue(self.image.save(str(target)))
+        button = self.button(app.dashboard, "Open image…", "打开图像…")
+        with patch("snaploom.app.QFileDialog.getOpenFileNames", side_effect=[([], ""), ([str(target)], "")]) as choose:
+            self.click(button)
+            self.assertFalse(app.pin_windows)
+            self.click(button)
+            self.assertEqual(choose.call_count, 2)
+        pin, = app.pin_windows.values()
+        self.assertTrue(pin.isVisible())
+        self.assertEqual(pin.image.pixelColor(20, 20), self.image.pixelColor(20, 20))
+
+    def test_tray_history_middle_click_close_and_quit_have_distinct_effects(self):
+        app = self.application
+        self.qt.clipboard().setText("Tray middle-click reference")
+        app.tray.activated.emit(QSystemTrayIcon.ActivationReason.MiddleClick)
+        pin, = app.pin_windows.values()
+        self.assertTrue(pin.isVisible())
+        self.assertEqual(pin.state["source_text"], "Tray middle-click reference")
+        with (
+            patch.object(self.qt, "quit") as quit_app,
+            patch.object(QSystemTrayIcon, "isSystemTrayAvailable", return_value=True),
+        ):
+            app.dashboard.close()
+            self.assertFalse(app.dashboard.isVisible())
+            self.assertTrue(pin.isVisible())
+            quit_app.assert_not_called()
+            self.tray_item("History", "历史")
+            self.assertTrue(app.dashboard.isVisible())
+            self.assertEqual(app.dashboard.tabs.currentIndex(), 1)
+            self.tray_item("Quit", "退出")
+            quit_app.assert_called_once_with()
+
+    def test_start_in_tray_leaves_a_workspace_when_the_tray_is_unavailable(self):
+        app = self.application
+        app.workspace.set("start_hidden", True)
+        app.dashboard.hide()
+        with patch.object(QSystemTrayIcon, "isSystemTrayAvailable", return_value=True):
+            app.command({})
+        self.assertFalse(app.dashboard.isVisible())
+        with patch.object(QSystemTrayIcon, "isSystemTrayAvailable", return_value=False):
+            app.command({})
+        self.assertTrue(app.dashboard.isVisible())
+
+    def test_pause_and_reenable_hotkeys_preserves_the_users_bindings(self):
+        app = self.application
+        bindings = app.workspace.get("hotkeys") | {"capture": "F8", "paste": ""}
+        app.workspace.set("hotkeys", bindings)
+        with patch.object(app.hotkeys, "configure", return_value=[]) as register:
+            app.command(arguments(["disable-hotkeys"]))
+            self.assertFalse(app.hotkeys_enabled)
+            register.assert_called_once_with({})
+            self.assertEqual(app.dashboard.shortcuts.text(), app.tr("Global shortcuts are paused.", "全局快捷键已暂停。"))
+            app.command(arguments(["enable-hotkeys"]))
+            self.assertTrue(app.hotkeys_enabled)
+            register.assert_called_with(bindings)
+        self.assertEqual(app.workspace.get("hotkeys"), bindings)
+        self.assertIn("F8", app.dashboard.shortcuts.text())
 
     def test_workspace_help_uses_current_shortcuts_and_fallback_buttons(self):
         app = self.application
@@ -194,7 +329,7 @@ class UserJourneyTests(unittest.TestCase):
         self.select_tab(1)
         history = app.dashboard.history_list
         point = history.visualItemRect(history.item(1)).center()
-        QTest.mouseClick(history.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        self.click(history.viewport(), point)
         selected_id = history.currentItem().data(Qt.ItemDataRole.UserRole)
         self.assertIn(app.tr("Copied", "已复制"), history.currentItem().text())
 
@@ -208,6 +343,15 @@ class UserJourneyTests(unittest.TestCase):
         self.assertEqual(preview.result_image.pixelColor(0, 0), earlier.pixelColor(0, 0))
         QTest.keyClick(preview, Qt.Key.Key_Escape)
         self.assertEqual(app.pin_windows, {})
+        history.setFocus()
+        QTest.keyClick(history, Qt.Key.Key_Enter, Qt.KeyboardModifier.KeypadModifier)
+        preview, = app.dialogs
+        self.assertEqual(preview.result_image.pixelColor(0, 0), earlier.pixelColor(0, 0))
+        QTest.keyClick(preview, Qt.Key.Key_Escape)
+        history.setFocus()
+        QTest.keyClick(history, Qt.Key.Key_Delete)
+        self.assertEqual(history.count(), 2)
+        self.assertTrue(app.workspace.history_image(selected_id).isNull())
 
     def test_save_cancel_keeps_selection_and_second_attempt_writes_file(self):
         editor = self.open_capture()
@@ -289,8 +433,7 @@ class UserJourneyTests(unittest.TestCase):
 
     def test_tray_capture_supports_keyboard_selection_and_copy(self):
         app = self.application
-        label = app.tr("Capture region", "区域截图")
-        next(action for action in app.tray_menu.actions() if action.text() == label).trigger()
+        self.tray_item("Capture region", "区域截图")
         self.until(lambda: app.editor is not None and app.editor.isVisible(), "Tray did not open the editor.")
         editor = app.editor
         start = QPoint(45, 54)
@@ -334,7 +477,7 @@ class UserJourneyTests(unittest.TestCase):
                         QTest.keyClick(transparent, Qt.Key.Key_Space)
                         self.assertTrue(transparent.isChecked())
                     buttons = dialog.findChild(QDialogButtonBox)
-                    self.click(buttons.button(QDialogButtonBox.StandardButton.Ok))
+                    QTest.keyClick(buttons.button(QDialogButtonBox.StandardButton.Ok), Qt.Key.Key_Space)
                     self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
                 except Exception as error:
                     callback_errors.append(error)
@@ -413,17 +556,14 @@ class UserJourneyTests(unittest.TestCase):
     def test_tray_clipboard_action_and_restore_remain_distinct_with_empty_clipboard(self):
         app = self.application
 
-        def tray_action(en, zh):
-            return next(action for action in app.tray_menu.actions() if action.text() == app.tr(en, zh))
-
         self.qt.clipboard().setText("Reference pinned from the tray")
-        tray_action("Pin clipboard content", "悬浮剪贴板内容").trigger()
+        self.tray_item("Pin clipboard content", "悬浮剪贴板内容")
         pin_id, = app.pin_windows
         pin = app.pin_windows[pin_id]
         self.assertTrue(pin.isVisible())
         QTest.keyClick(pin, Qt.Key.Key_Escape)
         self.qt.clipboard().clear()
-        tray_action("Pin clipboard content", "悬浮剪贴板内容").trigger()
+        self.tray_item("Pin clipboard content", "悬浮剪贴板内容")
         self.assertEqual(list(app.pin_windows), [pin_id])
         self.assertFalse(pin.isVisible())
         self.assertEqual(app.dashboard.status.text(), app.tr(
@@ -432,9 +572,9 @@ class UserJourneyTests(unittest.TestCase):
         ))
 
         with patch.object(self.qt, "clipboard") as read_clipboard:
-            tray_action("Restore last hidden pin", "恢复最近隐藏的贴图").trigger()
+            self.tray_item("Restore last hidden pin", "恢复最近隐藏的贴图")
             self.assertTrue(pin.isVisible())
-            tray_action("Restore last hidden pin", "恢复最近隐藏的贴图").trigger()
+            self.tray_item("Restore last hidden pin", "恢复最近隐藏的贴图")
             read_clipboard.assert_not_called()
         self.assertEqual(list(app.pin_windows), [pin_id])
         self.assertTrue(pin.isVisible())
@@ -465,7 +605,7 @@ class UserJourneyTests(unittest.TestCase):
                 pin_list = app.dashboard.pin_list
                 row = next(i for i in range(pin_list.count()) if pin_list.item(i).data(Qt.ItemDataRole.UserRole) == pin_id)
                 point = pin_list.visualItemRect(pin_list.item(row)).center()
-                QTest.mouseClick(pin_list.viewport(), Qt.MouseButton.LeftButton, pos=point)
+                self.click(pin_list.viewport(), point)
                 with patch("snaploom.app.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
                     self.click(self.button(app.dashboard, en, zh))
                 current_pins = set(app.pin_windows)
@@ -492,8 +632,7 @@ class UserJourneyTests(unittest.TestCase):
         pins = app.dashboard.pin_list
         row = next(index for index in range(pins.count())
                    if pins.item(index).data(Qt.ItemDataRole.UserRole) == second_id)
-        QTest.mouseClick(pins.viewport(), Qt.MouseButton.LeftButton,
-                         pos=pins.visualItemRect(pins.item(row)).center())
+        self.click(pins.viewport(), pins.visualItemRect(pins.item(row)).center())
         self.click(self.button(app.dashboard, "Hide", "隐藏"))
 
         self.stop_application()
@@ -564,13 +703,26 @@ class UserJourneyTests(unittest.TestCase):
         QTest.keyClick(app.editor, Qt.Key.Key_Return)
         self.select_tab(1)
         clear = self.button(app.dashboard, "Clear history…", "清空历史…")
-        with patch("snaploom.app.QMessageBox.question", side_effect=[
-            QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        ]):
-            self.click(clear)
-            self.assertEqual(app.dashboard.history_list.count(), 2)
-            self.click(clear)
+        defaults = []
+
+        def answer(approve):
+            dialog = self.qt.activeModalWidget()
+            if not isinstance(dialog, QMessageBox):
+                if dialog is not None:
+                    dialog.reject()
+                return
+            defaults.append(dialog.standardButton(dialog.defaultButton()))
+            if approve:
+                QTest.keyClick(dialog.button(QMessageBox.StandardButton.Yes), Qt.Key.Key_Space)
+            else:
+                QTest.keyClick(dialog, Qt.Key.Key_Return)
+
+        QTimer.singleShot(0, lambda: answer(False))
+        self.click(clear)
+        self.assertEqual(app.dashboard.history_list.count(), 2)
+        QTimer.singleShot(0, lambda: answer(True))
+        self.click(clear)
+        self.assertEqual(defaults, [QMessageBox.StandardButton.No] * 2)
         self.assertEqual(app.workspace.history(), [])
         self.assertEqual(app.dashboard.history_list.count(), 0)
 
@@ -588,10 +740,10 @@ class UserJourneyTests(unittest.TestCase):
                     dialog.fields["history_limit"].setValue(0)
                     dialog.shortcuts["capture"].setText("Ctrl+Alt+S")
                     buttons = dialog.findChild(QDialogButtonBox)
-                    self.click(buttons.button(QDialogButtonBox.StandardButton.Save))
+                    QTest.keyClick(buttons.button(QDialogButtonBox.StandardButton.Save), Qt.Key.Key_Space)
                     self.assertTrue(dialog.isVisible())
                     self.assertEqual(app.workspace.history_count(), 1)
-                    self.click(buttons.button(QDialogButtonBox.StandardButton.Save))
+                    QTest.keyClick(buttons.button(QDialogButtonBox.StandardButton.Save), Qt.Key.Key_Space)
                     self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
                 except Exception as error:
                     callback_errors.append(error)
@@ -669,6 +821,129 @@ class UserJourneyTests(unittest.TestCase):
             self.assertIn("F8", warning.call_args.args[-1])
             self.assertEqual(app.workspace.get("hotkeys")["capture"], "F1")
         dialog.reject()
+
+    def test_preferences_controls_save_values_and_survive_restart(self):
+        app = self.application
+        checkboxes = ("auto_save", "copy_after_save", "include_cursor", "restore_pins", "hide_pins_on_capture",
+                      "run_at_login", "start_hidden", "allow_remote_images", "show_grid", "show_magnifier",
+                      "detect_windows", "remember_annotation_styles", "capture_shadow")
+        numbers = {"history_limit": 51, "default_pin_opacity": 99, "annotation_width": 4, "rounded_corners": 1}
+        dropdowns = {"ocr_provider": "ocr-space", "format": "jpg", "color_format": "RGB",
+                     "hot_corner": "top-left", "super_snip": "alt"}
+        target = self.folder / "quick save"
+        expected = {key: not app.workspace.get(key) for key in checkboxes} | numbers | dropdowns | {
+            "save_folder": str(target), "save_pattern": "Test_%Y", "custom_commands": {"Inspect": "viewer {image}"},
+        }
+        initial = {key: app.workspace.get(key) for key in expected}
+        original_exec = Preferences.exec
+        failures = []
+
+        def edit(dialog):
+            def change():
+                try:
+                    self.assertEqual(set(dialog.fields), set(expected) - {"custom_commands"})
+                    tabs = dialog.findChild(QTabWidget)
+
+                    def focus(field):
+                        index = next(index for index in range(tabs.count()) if tabs.widget(index).isAncestorOf(field))
+                        if tabs.currentIndex() != index:
+                            self.click(tabs.tabBar(), tabs.tabBar().tabRect(index).center())
+                        self.assertTrue(field.isVisible())
+                        field.setFocus()
+
+                    for key in checkboxes:
+                        field = dialog.fields[key]
+                        focus(field)
+                        QTest.keyClick(field, Qt.Key.Key_Space)
+                        self.assertEqual(field.isChecked(), expected[key], key)
+                    for key, value in numbers.items():
+                        field = dialog.fields[key]
+                        focus(field)
+                        direction = Qt.Key.Key_Up if value > initial[key] else Qt.Key.Key_Down
+                        QTest.keyClick(field, direction)
+                        self.assertEqual(field.value(), value, key)
+                    for key, value in dropdowns.items():
+                        field = dialog.fields[key]
+                        self.assertIsInstance(field, QComboBox)
+                        focus(field)
+                        QTest.keyClick(field, Qt.Key.Key_Down)
+                        self.assertEqual(field.currentData() or field.currentText(), value, key)
+
+                    pattern = dialog.fields["save_pattern"]
+                    focus(pattern)
+                    QTest.keyClick(pattern, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+                    QTest.keyClicks(pattern, "Test_%Y")
+                    browse = self.button(dialog, "Browse…", "浏览…")
+                    QTest.keyClick(browse, Qt.Key.Key_Space)
+                    self.assertEqual(dialog.fields["save_folder"].text(), initial["save_folder"])
+                    QTest.keyClick(browse, Qt.Key.Key_Space)
+                    self.assertEqual(dialog.fields["save_folder"].text(), str(target))
+                    focus(dialog.commands)
+                    QTest.keyClicks(dialog.commands, "Inspect = viewer {image}")
+                    self.assertEqual({key: app.workspace.get(key) for key in expected}, initial)
+                    buttons = dialog.findChild(QDialogButtonBox)
+                    QTest.keyClick(buttons.button(QDialogButtonBox.StandardButton.Save), Qt.Key.Key_Space)
+                    self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+                except Exception as error:
+                    failures.append(error)
+                    dialog.reject()
+
+            QTimer.singleShot(0, change)
+            return original_exec(dialog)
+
+        with (
+            patch.object(Preferences, "exec", edit),
+            patch("snaploom.ui.QFileDialog.getExistingDirectory", side_effect=["", str(target)]),
+            patch.object(app, "set_login") as login,
+            patch.object(app, "configure_super_snip") as drag_hook,
+        ):
+            self.click(self.button(app.dashboard, "Settings", "设置"))
+        if failures:
+            raise failures[0]
+        login.assert_called_once_with(True)
+        drag_hook.assert_called_once_with()
+        self.assertEqual({key: app.workspace.get(key) for key in expected}, expected)
+        self.stop_application()
+        self.start_application()
+        self.assertEqual({key: self.application.workspace.get(key) for key in expected}, expected)
+
+    def test_reset_global_shortcuts_can_be_cancelled(self):
+        app = self.application
+        original = app.workspace.get("hotkeys") | {"capture": "F8", "paste": ""}
+        app.workspace.set("hotkeys", original)
+        dialog = Preferences(app.workspace, app.tr, app.dashboard)
+        self.addCleanup(dialog.deleteLater)
+        dialog.show()
+        tabs = dialog.findChild(QTabWidget)
+        index = next(index for index in range(tabs.count()) if tabs.widget(index).isAncestorOf(dialog.shortcuts["capture"]))
+        self.click(tabs.tabBar(), tabs.tabBar().tabRect(index).center())
+        self.click(self.button(dialog, "Restore default global shortcuts", "恢复默认全局快捷键"))
+        self.assertEqual(dialog.shortcuts["capture"].text(), "F1")
+        self.assertEqual(dialog.shortcuts["paste"].text(), "F3")
+        self.click(dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Cancel))
+        self.assertFalse(dialog.isVisible())
+        self.assertEqual(app.workspace.get("hotkeys"), original)
+
+    def test_settings_keyboard_tab_space_and_escape_do_not_save_changes(self):
+        app = self.application
+        dialog = Preferences(app.workspace, app.tr, app.dashboard)
+        self.addCleanup(dialog.deleteLater)
+        dialog.show()
+        self.qt.processEvents()
+        first, second = (dialog.fields[key] for key in ("auto_save", "copy_after_save"))
+        self.click(first, QPoint(7, first.height() // 2))
+        handle = dialog.windowHandle()
+        QTest.keyClick(handle, Qt.Key.Key_Tab)
+        self.assertIs(self.qt.focusWidget(), second)
+        QTest.keyClick(handle, Qt.Key.Key_Space)
+        self.assertTrue(second.isChecked())
+        QTest.keyClick(handle, Qt.Key.Key_Tab, Qt.KeyboardModifier.ShiftModifier)
+        self.assertIs(self.qt.focusWidget(), first)
+        QTest.keyClick(handle, Qt.Key.Key_Escape)
+        self.assertFalse(dialog.isVisible())
+        self.assertTrue(app.dashboard.isVisible())
+        self.assertFalse(app.workspace.get("auto_save"))
+        self.assertFalse(app.workspace.get("copy_after_save"))
 
     def test_barcode_menu_decodes_a_qr_image_and_copies_the_result(self):
         import zxingcpp

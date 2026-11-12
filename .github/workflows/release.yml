@@ -78,6 +78,10 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
+      - name: Verify editor and pin controls across Windows themes and scaling
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/test-editor-matrix.ps1
       - name: Verify Windows desktop capture and drag
         if: runner.os == 'Windows'
         env:

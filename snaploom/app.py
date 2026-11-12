@@ -604,25 +604,30 @@ class Application:
         self.start_recognition(image, action, complete, result_parent=editor)
 
     def custom_output(self, name, image, rect):
-        context = self.release_capture()
         config = self.workspace.get("custom_commands").get(name)
-        if not config:
-            self.failure("This output command is unavailable.", context.get("done"))
-            return
         try:
-            path = self.quick_save(image)
+            if not config:
+                raise ValueError(self.tr("This output command is unavailable.", "此输出命令不可用。"))
             tokens = shlex.split(config, posix=os.name != "nt")
+            if not tokens:
+                raise ValueError(self.tr("The command is empty.", "输出命令为空。"))
+            path = self.quick_save(image)
             argv = [part.strip('"').replace("{image}", str(path)) for part in tokens]
-            if not argv:
-                raise ValueError("The command is empty.")
             subprocess.Popen(argv, shell=False, **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
-            self.status(str(path))
-            self.workspace.remember(image, rect, name)
-            self.update_lists()
-            if context.get("done"):
-                context["done"](code=0, text=str(path))
         except (OSError, ValueError) as error:
-            self.failure(str(error), context.get("done"))
+            if self.editor is not None:
+                self.status(str(error))
+                QMessageBox.warning(self.editor, self.tr("Output could not be completed", "无法完成输出"), str(error))
+            else:
+                self.failure(str(error), self.capture_context.get("done"))
+            return
+        context = self.release_capture()
+        self.last_region = QRect(rect)
+        self.status(str(path))
+        self.workspace.remember(image, rect, name)
+        self.update_lists()
+        if context.get("done"):
+            context["done"](code=0, text=str(path))
 
     def failure(self, message, done=None):
         self.notify(message, error=True)
@@ -1435,7 +1440,7 @@ class Application:
 
     def check_corner(self):
         name = self.workspace.get("hot_corner")
-        if not name or not self.corners_enabled or self.capturing or self.editor is not None:
+        if not name or not self.corners_enabled:
             self.last_corner = None
             return
         point = QCursor.pos()
@@ -1447,15 +1452,20 @@ class Application:
         positions = {"top-left": geometry.topLeft, "top-right": geometry.topRight,
                      "bottom-left": geometry.bottomLeft, "bottom-right": geometry.bottomRight}
         corner = positions[name]()
-        if (corner - point).manhattanLength() <= 4:
-            if self.last_corner != corner:
-                self.last_corner = corner
-                self.corner_since = time.monotonic()
-            elif time.monotonic() - self.corner_since > 0.65:
-                self.corner_since = float("inf")
-                self.capture({})
-        else:
+        if (corner - point).manhattanLength() > 4:
             self.last_corner = None
+            return
+        if self.capturing or self.editor is not None:
+            # A corner that already triggered stays disarmed until the pointer leaves it.
+            if self.last_corner != corner or self.corner_since != float("inf"):
+                self.last_corner = None
+            return
+        if self.last_corner != corner:
+            self.last_corner = corner
+            self.corner_since = time.monotonic()
+        elif time.monotonic() - self.corner_since > 0.65:
+            self.corner_since = float("inf")
+            self.capture({})
 
     def configure_super_snip(self):
         if self.mouse_hook:
@@ -1487,7 +1497,10 @@ class Application:
                     if pressed:
                         origin = QCursor.pos() if getattr(keyboard.Key, key_name) in held else None
                     elif origin is not None:
-                        rect = QRect(origin, QCursor.pos()).normalized()
+                        end = QCursor.pos()
+                        top_left = QPoint(min(origin.x(), end.x()), min(origin.y(), end.y()))
+                        bottom_right = QPoint(max(origin.x(), end.x()), max(origin.y(), end.y()))
+                        rect = QRect(top_left, bottom_right)
                         origin = None
                         if rect.width() > 8 and rect.height() > 8:
                             self.signals.super_snip.emit(rect)

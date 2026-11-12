@@ -644,6 +644,7 @@ class CaptureEditor(QWidget):
         toolbar.setCursor(Qt.CursorShape.ArrowCursor)
         # Clicks on control padding or disabled controls must not start a canvas gesture.
         toolbar.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation)
+        toolbar.installEventFilter(self)
         toolbar.setStyleSheet(
             "QFrame#captureToolbar { background: #172334; color: #f4f7fc; border: 1px solid #52647b; border-radius: 11px; }"
             "QToolButton { color: #f4f7fc; background: transparent; border: 1px solid transparent; border-radius: 5px;"
@@ -916,15 +917,15 @@ class CaptureEditor(QWidget):
         if image.isNull():
             return
         geometry = self.selected_geometry()
-        if action in {"save", "quick-save", "copy-file", "print", "ocr", "barcode"} and not custom:
+        if custom:
+            self.custom_output.emit(action, image, geometry)
+            return
+        if action in {"save", "quick-save", "copy-file", "print", "ocr", "barcode"}:
             self.completed.emit(action, image, geometry)
             return
         self.finished = True
         self.hide()
-        if custom:
-            self.custom_output.emit(action, image, geometry)
-        else:
-            self.completed.emit(action, image, geometry)
+        self.completed.emit(action, image, geometry)
         self.close()
 
     def closeEvent(self, event):
@@ -1741,16 +1742,36 @@ class CaptureEditor(QWidget):
                 self._complete(self.default_action)
 
     def wheelEvent(self, event):
+        delta = event.angleDelta().y() or event.pixelDelta().y()
+        if not delta:
+            return super().wheelEvent(event)
         if self.selection.isEmpty() and self.windows and self.auto_detect and not self.color_only:
-            self._cycle_windows(-1 if event.angleDelta().y() > 0 else 1)
+            self._cycle_windows(-1 if delta > 0 else 1)
             return
         if not self.selected_items or not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
             return super().wheelEvent(event)
-        multiplier = 1.1 if event.angleDelta().y() > 0 else 1 / 1.1
+        multiplier = 1.1 if delta > 0 else 1 / 1.1
         self._commit(
             item.scaled(multiplier) if index in self.selected_items else item
             for index, item in enumerate(self.document.annotations)
         )
+
+    def eventFilter(self, watched, event):
+        if watched is self.toolbar and event.type() == QEvent.Type.KeyPress:
+            focus = QApplication.focusWidget()
+            if event.key() == Qt.Key.Key_Escape:
+                self._focus_canvas()
+                return True
+            if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+                if isinstance(focus, QToolButton):
+                    if focus.popupMode() == QToolButton.ToolButtonPopupMode.InstantPopup and focus.menu() is not None:
+                        focus.menu().popup(focus.mapToGlobal(QPoint(0, focus.height())))
+                    else:
+                        focus.click()
+                elif isinstance(focus, QComboBox):
+                    focus.showPopup()
+                return True
+        return super().eventFilter(watched, event)
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -1758,18 +1779,6 @@ class CaptureEditor(QWidget):
         key_code = Qt.Key
         control = bool(mods & Qt.KeyboardModifier.ControlModifier)
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
-        focus = QApplication.focusWidget()
-        if focus is not None and self.toolbar.isAncestorOf(focus):
-            if key == key_code.Key_Escape:
-                self._focus_canvas()
-                return
-            if key in {key_code.Key_Return, key_code.Key_Enter}:
-                if isinstance(focus, QToolButton):
-                    focus.click()
-                elif isinstance(focus, QComboBox):
-                    focus.showPopup()
-                return
-            return super().keyPressEvent(event)
         if key == key_code.Key_Escape:
             if self._keyboard_anchor is not None:
                 self._end_keyboard_selection(cancel=True)
@@ -1888,6 +1897,17 @@ class CaptureEditor(QWidget):
         if not self._embedded and self.selection.isEmpty() and self.windows:
             self._cycle_windows(1 if forward else -1)
             return True
+        if self.toolbar.isWindow() and self.toolbar.isVisible():
+            widget = self.toolbar
+            while True:
+                widget = widget.nextInFocusChain() if forward else widget.previousInFocusChain()
+                if widget is self.toolbar:
+                    break
+                if (self.toolbar.isAncestorOf(widget) and widget.isVisible() and widget.isEnabled()
+                        and widget.focusPolicy() & Qt.FocusPolicy.TabFocus):
+                    self.toolbar.activateWindow()
+                    widget.setFocus(Qt.FocusReason.TabFocusReason if forward else Qt.FocusReason.BacktabFocusReason)
+                    return True
         return super().focusNextPrevChild(forward)
 
     def _nudge(self, direction, *, resize=False, large=False):

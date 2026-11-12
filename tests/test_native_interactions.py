@@ -9,11 +9,74 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyle, QStyleFactory, QStyleOptionSpinBox
 
 from snaploom.capture import ScreenFrame, Snapshot
-from snaploom.editor import CaptureEditor
+from snaploom.editor import CaptureEditor, ImageEditor
+from snaploom.hotkeys import LABELS, Hotkeys
 
 
 @unittest.skipUnless(os.environ.get("SNAPLOOM_TEST_DESKTOP") == "1", "needs a live test desktop")
 class DesktopSelectionTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "requires Win32 global shortcut registration")
+    def test_each_windows_global_shortcut_dispatches_and_releases_its_registration(self):
+        import ctypes
+        from ctypes import wintypes
+
+        app = QApplication.instance() or QApplication([])
+        user = ctypes.WinDLL("user32", use_last_error=True)
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetCurrentThreadId.restype = wintypes.DWORD
+        post = user.PostThreadMessageW
+        post.argtypes = (wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+        post.restype = wintypes.BOOL
+        thread_id = kernel.GetCurrentThreadId()
+        message, modifiers, first_key = 0x0312, 0x0003, 0x7C  # WM_HOTKEY, Ctrl+Alt, F13
+        actions = ("capture", "paste", "toggle_pins", "repeat", "click_through", "active")
+        self.assertEqual(set(actions), set(LABELS))
+        shortcuts = {action: f"Ctrl+Alt+F{index}" for index, action in enumerate(actions, 13)}
+        backend = Hotkeys()
+        triggered = []
+        backend.triggered.connect(triggered.append)
+        self.addCleanup(backend.close)
+        self.assertEqual(backend.configure(shortcuts), [], backend.errors)
+        for index, action in enumerate(actions):
+            key = first_key + index
+            self.assertTrue(post(thread_id, message, index + 1, (key << 16) | modifiers))
+            for _ in range(20):
+                QTest.qWait(10)
+                if len(triggered) > index:
+                    break
+            self.assertEqual(triggered, list(actions[:index + 1]), action)
+
+        backend.close()
+        self.assertTrue(post(thread_id, message, 1, (first_key << 16) | modifiers))
+        app.processEvents()
+        self.assertEqual(triggered, list(actions))
+        self.assertEqual(backend.configure(shortcuts), [], backend.errors)
+
+    @unittest.skipUnless(os.name == "nt", "exercises native Windows dialog focus")
+    def test_enter_on_embedded_tool_button_does_not_apply_the_image(self):
+        app = QApplication.instance() or QApplication([])
+        image = QImage(320, 220, QImage.Format.Format_RGB32)
+        image.fill(Qt.GlobalColor.white)
+        dialog = ImageEditor(image)
+        self.addCleanup(dialog.close)
+        applied = []
+        dialog.applied.connect(applied.append)
+        dialog.show()
+        self.assertTrue(QTest.qWaitForWindowExposed(dialog, 2000))
+        dialog.activateWindow()
+        dialog.canvas.setFocus()
+        target = dialog.canvas.tool_buttons["rectangle"]
+        for _ in range(30):
+            QTest.keyClick(dialog.windowHandle(), Qt.Key.Key_Tab)
+            app.processEvents()
+            if app.focusWidget() is target:
+                break
+        self.assertIs(app.focusWidget(), target)
+        QTest.keyClick(dialog.windowHandle(), Qt.Key.Key_Return)
+        self.assertTrue(dialog.isVisible())
+        self.assertEqual(dialog.canvas.tool, "rectangle")
+        self.assertEqual(applied, [])
+
     def test_toolbar_uses_normal_pointer_on_the_desktop(self):
         app = QApplication.instance() or QApplication([])
         available = app.primaryScreen().availableGeometry()
