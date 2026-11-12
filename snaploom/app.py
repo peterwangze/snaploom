@@ -20,7 +20,7 @@ from PySide6.QtGui import QColor, QCursor, QIcon, QImage
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QInputDialog, QLabel, QListWidget, QMenu, QMessageBox, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
+    QInputDialog, QLabel, QListWidget, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
     QTextEdit, QVBoxLayout,
 )
 
@@ -59,13 +59,13 @@ class Application:
         self.dashboard.action.connect(self.dashboard_action)
         self.dashboard.history_action.connect(self.history_action)
         self.dashboard.pin_action.connect(self.pin_action)
+        self.dashboard.pin_delete_requested.connect(self.request_pin_delete)
         self.dashboard.files_dropped.connect(self.open_files)
         self.dashboard.closing.connect(self.close_dashboard)
         self.editor = None
         self.capturing = False
         self.capture_context = {}
         self.pin_windows = {}
-        self.hidden_pins = []
         self.closed_pins = []
         self.last_region = next(iter(self.workspace.regions()), None)
         self.group = self.workspace.get("current_group") or "Default"
@@ -133,9 +133,7 @@ class Application:
             self.qt.quit()
 
     def tray_clicked(self, reason):
-        if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self.action("capture")
-        elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+        if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick}:
             self.show_dashboard()
         elif reason == QSystemTrayIcon.ActivationReason.MiddleClick:
             self.action("paste")
@@ -164,14 +162,20 @@ class Application:
             ("restore-last-pin", "Restore last hidden pin", "恢复最近隐藏的贴图"),
             ("toggle_pins", "Show or hide pins", "显示或隐藏贴图"),
             ("recover", "Recover off-screen pins", "找回屏幕外贴图"),
-            ("click_through", "Toggle pin click-through", "切换贴图鼠标穿透"),
-            ("history", "History", "历史"), ("settings", "Settings", "设置"), ("quit", "Quit", "退出"),
+            ("no-click-through", "Disable click-through for all pins", "关闭所有贴图的鼠标穿透"),
+            ("history", "History", "历史"), ("settings", "Settings", "设置"),
+            ("help", "Help", "操作帮助"), ("quit", "Quit", "退出"),
         ):
             self.tray_menu.addAction(self.tr(en, zh), lambda checked=False, name=action: self.action(name))
 
-    def configure_hotkeys(self):
-        shortcuts = self.workspace.get("hotkeys")
+    def configure_hotkeys(self, shortcuts=None):
+        if shortcuts is None:
+            shortcuts = self.workspace.get("hotkeys")
+        previously_unavailable = self.hotkeys.unavailable
         unavailable = self.hotkeys.configure(shortcuts if self.hotkeys_enabled else {})
+        if not self.hotkeys_enabled:
+            self.dashboard.shortcuts.setText(self.tr("Global shortcuts are paused.", "全局快捷键已暂停。"))
+            return unavailable
         labels = [
             f'{self.tr("Capture", "截图")}  {shortcuts.get("capture") or "—"}',
             f'{self.tr("Pin clipboard", "悬浮剪贴板")}  {shortcuts.get("paste") or "—"}',
@@ -188,7 +192,23 @@ class Application:
                 details.append(f"{shortcuts[action]} ({reason})")
             labels.append(self.tr("Change in Settings: ", "请在设置中修改：") + ", ".join(details))
             self.status(self.tr("Some global shortcuts could not be registered.", "部分全局快捷键注册失败。"))
+        elif previously_unavailable:
+            self.status(self.tr("Global shortcuts are ready.", "全局快捷键已就绪。"))
         self.dashboard.shortcuts.setText("   ·   ".join(labels))
+        return unavailable
+
+    def apply_hotkeys(self, shortcuts):
+        previous = self.workspace.get("hotkeys")
+        if not self.hotkeys_enabled or (shortcuts == previous and not self.hotkeys.unavailable):
+            return None
+        unavailable = self.configure_hotkeys(shortcuts)
+        for action in unavailable:
+            if shortcuts[action] != previous.get(action) and self.hotkeys.errors.get(action) == 1409:
+                self.configure_hotkeys(previous)
+                key = shortcuts[action]
+                return action, self.tr(f"{key} is already in use. Choose a different key or cancel to keep the current shortcuts.",
+                                       f"{key} 已被占用。请选择其他按键，或取消以保留当前快捷键。")
+        return None
 
     def dashboard_action(self, action):
         if action == "paste":
@@ -224,6 +244,8 @@ class Application:
             self.toggle_pins()
         elif action == "click_through":
             self.toggle_click_through()
+        elif action == "no-click-through":
+            self.disable_click_through()
         elif action == "recover":
             self.recover_pins()
         elif action == "manage-groups":
@@ -234,6 +256,8 @@ class Application:
             self.show_dashboard(1)
         elif action == "settings":
             self.settings()
+        elif action == "help":
+            self.help()
         elif action == "quit":
             self.qt.quit()
 
@@ -241,29 +265,19 @@ class Application:
         if self.editor is not None or self.capturing:
             self.failure(self.tr("Finish the current capture first.", "请先完成当前截图。"), done)
             return
-        if options.get("custom"):
-            custom = self.custom_region()
-            if custom is None:
-                if done:
-                    done(code=1)
-                return
-            options = options | custom
-        elif options.get("whiteboard") and not options.get("size") and not options.get("color"):
-            custom = self.custom_region(whiteboard=True)
-            if custom is None:
-                if done:
-                    done(code=1)
-                return
-            options = options | custom
         self.capturing = True
-        self.capture_context = {"options": options, "done": done, "dashboard": self.dashboard.isVisible(), "pins": []}
+        whiteboard = options.get("whiteboard", False)
+        if options.get("custom") or (whiteboard and not options.get("size") and not options.get("color")):
+            custom = self.custom_region(whiteboard=whiteboard)
+            if custom is None:
+                self.capturing = False
+                if done:
+                    done(code=1, error=self.tr("Capture cancelled.", "已取消截图。"))
+                return
+            options = options | custom
+        self.capture_context = {"options": options, "done": done, "dashboard": self.dashboard.isVisible()}
         self.dashboard.hide()
-        if self.workspace.get("hide_pins_on_capture"):
-            for pin in self.pin_windows.values():
-                if pin.isVisible():
-                    disable_capture_window_transitions(pin)
-                    pin.hide()
-                    self.capture_context["pins"].append(pin)
+        self.capture_context["pins"] = self.hide_capture_pins()
         delay = float(options.get("delay", 0))
         if delay:
             self.status(self.tr(f"Capturing in {delay:g} seconds", f"{delay:g} 秒后截图"))
@@ -274,23 +288,31 @@ class Application:
         dialog.setWindowTitle(self.tr("Whiteboard", "白板") if whiteboard else self.tr("Capture size and delay", "截图尺寸与延时"))
         layout = QFormLayout(dialog)
         point = QCursor.pos()
+        specs = []
+        max_width, max_height = 16384, 16384
+        if whiteboard:
+            geometry = (self.qt.screenAt(point) or self.qt.primaryScreen()).geometry()
+            max_width, max_height = geometry.width(), geometry.height()
+        else:
+            specs.extend((("X", "X", point.x(), -65536, 65536), ("Y", "Y", point.y(), -65536, 65536)))
+        specs.extend((
+            ("Width (logical pixels)", "宽度（逻辑像素）", 800, 1, max_width),
+            ("Height (logical pixels)", "高度（逻辑像素）", 520, 1, max_height),
+        ))
         fields = []
-        for en, zh, value, lower, upper in (
-            ("X", "X", point.x(), -65536, 65536), ("Y", "Y", point.y(), -65536, 65536),
-            ("Width (logical pixels)", "宽度（逻辑像素）", 800, 1, 16384),
-            ("Height (logical pixels)", "高度（逻辑像素）", 520, 1, 16384),
-        ):
+        for en, zh, value, lower, upper in specs:
             field = QSpinBox()
             field.setRange(lower, upper)
             field.setValue(value)
             layout.addRow(self.tr(en, zh), field)
             fields.append(field)
-        delay = QDoubleSpinBox()
-        delay.setRange(0, 600)
-        layout.addRow(self.tr("Delay (seconds)", "延时（秒）"), delay)
-        transparent = QCheckBox(self.tr("Transparent background", "透明背景"))
         if whiteboard:
+            transparent = QCheckBox(self.tr("Transparent background", "透明背景"))
             layout.addRow(transparent)
+        else:
+            delay = QDoubleSpinBox()
+            delay.setRange(0, 600)
+            layout.addRow(self.tr("Delay (seconds)", "延时（秒）"), delay)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
@@ -298,9 +320,10 @@ class Application:
         disable_capture_window_transitions(dialog)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        rect = [field.value() for field in fields]
-        return {"rect": rect, "size": rect[2:], "delay": delay.value(), "whiteboard": whiteboard,
-                "transparent": transparent.isChecked()}
+        values = [field.value() for field in fields]
+        if whiteboard:
+            return {"size": values, "transparent": transparent.isChecked()}
+        return {"rect": values, "size": values[2:], "delay": delay.value()}
 
     def start_capture(self):
         context = self.capture_context
@@ -337,6 +360,7 @@ class Application:
                 self.capture_completed("output", image, selection)
                 return
             suggest_windows = self.workspace.get("detect_windows") and not options.get("whiteboard")
+            requested_output = options.get("output") or options.get("recognition")
             editor_options = self._annotation_options() | {
                 "locale": self.locale, "show_guides": self.workspace.get("show_grid"),
                 "show_magnifier": self.workspace.get("show_magnifier"),
@@ -344,11 +368,16 @@ class Application:
                 "color_format": self.workspace.get("color_format").lower(),
                 "corner_radius": radius,
                 "custom_outputs": {name: name for name in self.workspace.get("custom_commands")},
-                "default_action": "output" if options.get("output") else "copy",
+                "default_action": "output" if requested_output else "copy",
+                "requested_outputs": options.get("output", ()),
                 "aspect_ratio": (tuple(options["size"]) if options.get("size") and options.get("keep_aspect_ratio") else None),
                 "detect_elements": detect_elements if suggest_windows else None,
+                "allow_refresh": not options.get("whiteboard"),
+                "allow_scroll": not options.get("whiteboard"),
                 "color_only": options.get("color_only", False),
             }
+            if options.get("recognition") == "barcode-copy":
+                editor_options["requested_output_label"] = self.tr("Scan and copy code", "识别并复制条码")
             windows = detect_windows() if suggest_windows else ()
             self.editor = CaptureEditor(snapshot, selection=selection, windows=windows, options=editor_options,
                                         history=self.workspace.regions())
@@ -405,17 +434,19 @@ class Application:
     def refresh_capture(self):
         from .capture import CaptureError, capture_desktop, detect_windows
 
-        if not self.editor or self.capture_context["options"].get("whiteboard"):
+        if not self.editor or not self.editor.isVisible() or self.capture_context["options"].get("whiteboard"):
             return
         editor = self.editor
+        include_cursor = self.capture_context["options"].get("cursor") or self.workspace.get("include_cursor")
         editor.hide()
 
         def refresh():
             if self.editor is not editor:
                 return
             try:
-                snapshot = capture_desktop(include_cursor=self.workspace.get("include_cursor"))
-                editor.set_snapshot(snapshot, detect_windows())
+                snapshot = capture_desktop(include_cursor=include_cursor)
+                windows = detect_windows() if editor.options["auto_detect"] else ()
+                editor.set_snapshot(snapshot, windows)
             except (CaptureError, RuntimeError) as error:
                 self.notify(str(error), error=True)
             finally:
@@ -424,16 +455,30 @@ class Application:
 
         QTimer.singleShot(120, refresh)
 
-    def release_capture(self, restore_dashboard=True):
+    def hide_capture_pins(self):
+        hidden = []
+        if self.workspace.get("hide_pins_on_capture"):
+            for pin in self.pin_windows.values():
+                if pin.isVisible():
+                    disable_capture_window_transitions(pin)
+                    pin.hide()
+                    hidden.append(pin)
+        return hidden
+
+    def restore_capture_pins(self, pins):
+        for pin in pins:
+            if pin in self.pin_windows.values() and pin.state["group"] == self.group and pin.state["visible"]:
+                pin.show()
+
+    def release_capture(self, restore_dashboard=True, *, restore_pins=True):
         context = self.capture_context
         self.capture_context = {}
         editor, self.editor = self.editor, None
         if editor:
             editor.hide()
             editor.deleteLater()
-        for pin in context.get("pins", []):
-            if pin in self.pin_windows.values():
-                pin.show()
+        if restore_pins:
+            self.restore_capture_pins(context.get("pins", []))
         if restore_dashboard and (context.get("dashboard") or not QSystemTrayIcon.isSystemTrayAvailable()):
             self.dashboard.show()
         self.capturing = False
@@ -453,37 +498,43 @@ class Application:
 
     def capture_completed(self, action, image, rect):
         options = self.capture_context.get("options", {})
+        outputs = options.get("output") if action == "output" else None
+        recognition = options.get("recognition")
+        if image.isNull():
+            context = self.release_capture()
+            self.failure(self.tr("The captured image is empty.", "截图为空。"), context.get("done"))
+            return
         shadow = options.get("shadow")
         if shadow is None:
             shadow = self.workspace.get("capture_shadow")
-        if shadow and not image.isNull() and action not in {"ocr", "barcode", "scroll"}:
+        if shadow and action not in {"ocr", "barcode", "scroll"}:
             try:
                 image = shadowed(image)
             except (ValueError, RuntimeError) as error:
                 self.notify(str(error), error=True)
-        if (self.editor is not None and action in {"save", "quick-save", "copy-file", "print"}
-                and not options.get("recognition") and not (options.get("hold") and options.get("output"))):
-            self._complete_editor_output(action, image, rect)
+        if self.editor is not None and not recognition and not outputs:
+            if action in {"save", "quick-save", "copy-file", "print"}:
+                self._complete_editor_output(action, image, rect)
+                return
+            if action in {"ocr", "barcode"}:
+                self._recognize_editor_selection(image, action)
+                return
+        if action == "scroll" and not recognition and not outputs:
+            context = self.release_capture(restore_dashboard=False, restore_pins=False)
+            self.scroll_capture(image, rect, context.get("done"), restore_dashboard=context.get("dashboard", False),
+                                hidden_pins=context.get("pins", []))
             return
-        context = self.release_capture(restore_dashboard=action != "scroll")
-        options = context.get("options", {})
+        context = self.release_capture()
         done = context.get("done")
-        if image.isNull():
-            self.failure(self.tr("The captured image is empty.", "截图为空。"), done)
-            return
         self.last_region = QRect(rect)
-        if options.get("recognition"):
-            self.output(image, options["recognition"], rect, done)
+        if recognition:
+            self.output(image, recognition, rect, done)
             return
-        output = options.get("output") if action == "output" or options.get("hold") else None
-        if output:
-            self.output_pipeline(image, rect, output, done)
+        if outputs:
+            self.output_pipeline(image, rect, outputs, done)
             return
         if action == "output":
             action = "copy"
-        if action == "scroll":
-            self.scroll_capture(image, rect, done, restore_dashboard=context.get("dashboard", False))
-            return
         self.output(image, action, rect, done)
 
     def _complete_editor_output(self, action, image, rect):
@@ -521,6 +572,36 @@ class Application:
                 done(code=0, text=text)
 
         self.output(image, action, rect, complete, record=False, on_error=show_error)
+
+    def _recognize_editor_selection(self, image, action):
+        editor = self.editor
+        title = self.tr("Recognize selection", "识别选区")
+        if self.recognition_jobs:
+            QMessageBox.information(editor, title, self.tr("Recognition is already running.", "正在识别，请稍候。"))
+            return
+
+        dialog = QDialog(editor)
+        dialog.setWindowTitle(title)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(self.tr("Recognizing the selection…", "正在识别选区…")))
+        progress = QProgressBar()
+        progress.setRange(0, 0)
+        layout.addWidget(progress)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def complete(code=0, text="", error=""):
+            if dialog not in self.dialogs or self.editor is not editor:
+                return False
+            dialog.accept()
+            if code:
+                QMessageBox.information(editor, title, error)
+            return not code
+
+        self.keep_dialog(dialog)
+        self.start_recognition(image, action, complete, result_parent=editor)
 
     def custom_output(self, name, image, rect):
         context = self.release_capture()
@@ -603,7 +684,8 @@ class Application:
 
         execute(0)
 
-    def output(self, image, action, rect=None, done=None, target=None, *, silent=False, record=True, on_error=None):
+    def output(self, image, action, rect=None, done=None, target=None, *, silent=False, record=True, on_error=None,
+               dialog_parent=None):
         rect = QRect(rect) if rect is not None else QRect()
         text = ""
         try:
@@ -617,7 +699,7 @@ class Application:
                     image.setDevicePixelRatio(max(1.0, image.width() / max(1, rect.width())))
                 self.open_pin(image, rect.topLeft() if rect.isValid() else None)
             elif action == "save":
-                target = self.save_dialog(image)
+                target = self.save_dialog(image, parent=dialog_parent)
                 if not target:
                     if done:
                         done(code=1, error="Save cancelled.")
@@ -668,10 +750,13 @@ class Application:
     def _record_output(self, image, rect, action, *, already_saved):
         if not rect.isValid():
             return
-        if not already_saved and action != "copy-file" and self.workspace.get("auto_save"):
-            self.quick_save(image)
         self.workspace.remember(image, rect, action)
         self.update_lists()
+        if not already_saved and action != "copy-file" and self.workspace.get("auto_save"):
+            try:
+                self.quick_save(image)
+            except (OSError, RuntimeError, ValueError) as error:
+                self.notify(self.tr(f"Automatic save failed. {error}", f"自动保存失败。{error}"), error=True)
 
     def print_image(self, image):
         from PySide6.QtGui import QPainter
@@ -706,13 +791,16 @@ class Application:
             path = folder / f"{filename}_{index}.{ext}"
         raise OSError("Too many files use this filename pattern.")
 
-    def save_dialog(self, image):
+    def save_dialog(self, image, *, parent=None):
         ext = self.workspace.get("format")
-        folder = Path(self.workspace.get("save_folder") or pictures_directory())
-        folder.mkdir(parents=True, exist_ok=True)
+        folder = Path(self.workspace.get("save_folder") or pictures_directory()).expanduser()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            folder = self.workspace.directory
         initial = folder / f"{datetime.now():Snaploom_%Y-%m-%d_%H-%M-%S}.{ext}"
         path, selected = QFileDialog.getSaveFileName(
-            self.dashboard if self.dashboard.isVisible() else None,
+            parent if parent is not None else self.dashboard if self.dashboard.isVisible() else None,
             self.tr("Save screenshot", "保存截图"), str(initial),
             "PNG (*.png);;JPEG (*.jpg *.jpeg);;WebP (*.webp);;Bitmap (*.bmp)",
         )
@@ -731,8 +819,6 @@ class Application:
         image.setDevicePixelRatio(state["dpr"])
         if position is not None:
             state.update({"x": position.x(), "y": position.y()})
-        if restore and not self.workspace.get("restore_pins"):
-            state["visible"] = False
         if not pin_id:
             pin_id = self.workspace.add_pin(image, state)
         window = PinWindow(image, state, self.tr)
@@ -740,9 +826,11 @@ class Application:
                                        if other is not window and other.isVisible()]
         self.pin_windows[pin_id] = window
         window.changed.connect(lambda: self.save_pin(pin_id))
-        window.dismissed.connect(lambda destroy: self.pin_action("delete" if destroy else "hide", pin_id))
+        window.dismissed.connect(lambda destroy: self.request_pin_delete([pin_id], window)
+                                 if destroy else self.pin_action("hide", pin_id))
         window.action_requested.connect(lambda action: self.pin_action(action, pin_id))
-        if state.get("visible", True) and state["group"] == self.group:
+        if (state.get("visible", True) and state["group"] == self.group
+                and (not restore or self.workspace.get("restore_pins"))):
             window.show()
         if not restore:
             window.recover_position()
@@ -754,6 +842,19 @@ class Application:
         window = self.pin_windows.get(pin_id)
         if window:
             self.workspace.update_pin(pin_id, window.state, window.image if include_image else None)
+
+    def request_pin_delete(self, pin_ids, parent=None):
+        ids = [pin_id for pin_id in pin_ids if pin_id in self.pin_windows]
+        if not ids:
+            return
+        message = (self.tr("Permanently delete this pin?", "永久删除这张贴图？") if len(ids) == 1 else
+                   self.tr(f"Permanently delete these {len(ids)} pins?", f"永久删除这 {len(ids)} 张贴图？"))
+        result = QMessageBox.question(parent or self.dashboard, self.tr("Delete pins", "删除贴图"), message,
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                      QMessageBox.StandardButton.No)
+        if result == QMessageBox.StandardButton.Yes:
+            for pin_id in ids:
+                self.pin_action("delete", pin_id)
 
     def pin_action(self, action, pin_id):
         if action == "recover":
@@ -793,33 +894,45 @@ class Application:
             window.raise_()
             self.save_pin(pin_id)
         elif action == "group":
-            group, ok = QInputDialog.getItem(self.dashboard, self.tr("Pin group", "贴图分组"),
+            groups = self.groups()
+            group, ok = QInputDialog.getItem(self.dashboard if self.dashboard.isVisible() else window,
+                                             self.tr("Pin group", "贴图分组"),
                                              self.tr("Move to or create a group", "移动到分组，或输入新分组"),
-                                             self.groups(), 0, True)
-            if ok and group.strip():
-                window.state["group"] = group.strip()
+                                             groups, groups.index(window.state["group"]), True)
+            group = group.strip()[:100]
+            if ok and group and group != window.state["group"]:
+                if group not in groups:
+                    self.workspace.set("groups", [*groups, group])
+                window.state["group"] = group
                 window.setVisible(window.state["visible"] and window.state["group"] == self.group)
                 self.save_pin(pin_id)
                 self.rebuild_tray()
         elif action in {"annotate", "crop"}:
             from .editor import Annotation, ImageEditor
 
-            annotations = tuple(Annotation(**(item | {"points": tuple(map(tuple, item["points"]))}))
-                                for item in window.state.get("annotations", []))
-            dialog = ImageEditor(window.image, parent=window, locale=self.locale, annotations=annotations,
+            cropped = action == "crop"
+            annotations = () if cropped else tuple(
+                Annotation(**(item | {"points": tuple(map(tuple, item["points"]))}))
+                for item in window.state.get("annotations", [])
+            )
+            dialog = ImageEditor(window.view if cropped else window.image,
+                                 parent=window, locale=self.locale, annotations=annotations,
                                  options=self._annotation_options())
             self._connect_annotation_settings(dialog.canvas)
-            if action == "crop" and hasattr(dialog, "activate_crop"):
+            if cropped:
                 dialog.activate_crop()
             dialog.applied.connect(lambda updated: self.update_pin_image(
-                pin_id, dialog.result_base, [asdict(annotation) for annotation in dialog.annotations]
+                pin_id, dialog.result_base, [asdict(annotation) for annotation in dialog.annotations], cropped=cropped
             ))
             self.keep_dialog(dialog)
         elif action == "replace":
             mime = self.qt.clipboard().mimeData()
             images = clipboard_images(mime)
-            if images:
-                self.replace_pin_source(pin_id, images[0], self.clipboard_state(mime))
+            if not images:
+                self.notify(self.tr("Copy an image, text, or color before replacing a pin.",
+                                    "请先复制图片、文字或色值，再替换贴图。"))
+                return
+            self.replace_pin_source(pin_id, images[0], self.clipboard_state(mime))
         elif action == "edit-color":
             current = QColor(window.state["color_card"])
             color = QColorDialog.getColor(current, window)
@@ -830,15 +943,16 @@ class Application:
             self.output(window.view, action)
         self.update_lists()
 
-    def update_pin_image(self, pin_id, updated, annotations):
+    def update_pin_image(self, pin_id, updated, annotations, *, cropped=False):
         window = self.pin_windows.get(pin_id)
         if window:
             updated.setDevicePixelRatio(window.state.get("dpr", 1))
-            window.state["annotations"] = annotations
-            window.state.pop("animation", None)
-            window.load_animation()
-            window.replace(updated)
-            self.save_pin(pin_id, include_image=True)
+            if cropped:
+                self.replace_pin_source(pin_id, updated, {})
+            else:
+                window.state["annotations"] = annotations
+                window.replace(updated, preserve_appearance=True)
+                self.save_pin(pin_id, include_image=True)
             self.update_lists()
 
     def replace_pin_source(self, pin_id, image, state):
@@ -902,12 +1016,14 @@ class Application:
                                             self.tr("New name", "新名称"), text=source)
             name = name.strip()[:100]
             if ok and name and name not in self.groups():
+                previous = self.previous_group
                 for pin_id, window in self.pin_windows.items():
                     if window.state["group"] == source:
                         window.state["group"] = name
                         self.save_pin(pin_id)
                 self.workspace.set("groups", [name if group == source else group for group in self.groups()])
                 self.switch_group(name if self.group == source else self.group)
+                self.previous_group = name if previous == source else previous
                 refresh(name)
 
         def remove():
@@ -918,12 +1034,14 @@ class Application:
                                             self.tr("Move its pins to Default and remove this group?", "把该组贴图移至默认分组并移除此组？"))
             if approved != QMessageBox.StandardButton.Yes:
                 return
+            previous = self.previous_group
             for pin_id, window in self.pin_windows.items():
                 if window.state["group"] == source:
                     window.state["group"] = "Default"
                     self.save_pin(pin_id)
             self.workspace.set("groups", [name for name in self.groups() if name != source])
             self.switch_group("Default" if self.group == source else self.group)
+            self.previous_group = self.group if previous == source else previous
             refresh()
 
         def move(step):
@@ -937,20 +1055,30 @@ class Application:
                 refresh(names[target])
 
         row = QHBoxLayout()
-        for en, zh, callback in (
-            ("New…", "新建…", lambda: (self.create_group(), refresh())),
-            ("Rename…", "重命名…", rename), ("Remove…", "移除…", remove),
-            ("Up", "上移", lambda: move(-1)), ("Down", "下移", lambda: move(1)),
+        group_buttons = {}
+        for action, en, zh, callback in (
+            ("new", "New…", "新建…", lambda: (self.create_group(), refresh())),
+            ("rename", "Rename…", "重命名…", rename), ("remove", "Remove…", "移除…", remove),
+            ("up", "Up", "上移", lambda: move(-1)), ("down", "Down", "下移", lambda: move(1)),
         ):
             button = QPushButton(self.tr(en, zh))
             button.clicked.connect(callback)
+            group_buttons[action] = button
             row.addWidget(button)
+
+        def update_actions(index):
+            group_buttons["rename"].setEnabled(index > 0)
+            group_buttons["remove"].setEnabled(index > 0)
+            group_buttons["up"].setEnabled(index > 1)
+            group_buttons["down"].setEnabled(0 < index < groups.count() - 1)
+
         layout.addLayout(row)
         bottom = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         switch = bottom.addButton(self.tr("Switch to group", "切换到该组"), QDialogButtonBox.ButtonRole.ActionRole)
         switch.clicked.connect(lambda: self.switch_group(selected()))
         bottom.rejected.connect(dialog.reject)
         groups.itemDoubleClicked.connect(lambda item: self.switch_group(item.text()))
+        groups.currentRowChanged.connect(update_actions)
         layout.addWidget(bottom)
         refresh()
         self.keep_dialog(dialog)
@@ -960,23 +1088,16 @@ class Application:
             self.previous_group = self.group
         self.group = name
         self.workspace.set("current_group", name)
-        self.hidden_pins = []
         for window in self.pin_windows.values():
             window.setVisible(window.state["group"] == name and window.state["visible"])
         self.rebuild_tray()
         self.update_lists()
 
     def toggle_pins(self):
-        visible = [pin_id for pin_id, pin in self.pin_windows.items() if pin.isVisible()]
-        if visible:
-            self.hidden_pins = visible
-            for pin_id in visible:
-                self.pin_windows[pin_id].hide()
-        else:
-            for pin_id, window in self.pin_windows.items():
-                if window.state["group"] == self.group and (pin_id in self.hidden_pins or window.state["visible"]):
-                    window.show()
-            self.hidden_pins = []
+        group = [pin for pin in self.pin_windows.values() if pin.state["group"] == self.group]
+        show = not any(pin.isVisible() for pin in group)
+        for pin in group:
+            pin.setVisible(show and pin.state["visible"])
         self.update_lists()
 
     def toggle_click_through(self):
@@ -986,15 +1107,21 @@ class Application:
         if target:
             target.set_state("click_through", not target.state["click_through"])
         else:
-            for window in self.pin_windows.values():
-                window.set_state("click_through", False)
+            self.disable_click_through()
+            return
         self.status(self.tr("Click-through updated", "鼠标穿透设置已更新"))
 
-    def recover_pins(self):
+    def disable_click_through(self):
+        for window in self.pin_windows.values():
+            if window.state["click_through"]:
+                window.set_state("click_through", False)
+        self.status(self.tr("Mouse interaction restored for all pins.", "所有贴图均已恢复鼠标操作。"))
+
+    def recover_pins(self, *, show=False):
         for window in self.pin_windows.values():
             if window.state["group"] == self.group:
                 window.recover_position()
-                if window.state["visible"]:
+                if show and window.state["visible"]:
                     window.show()
         self.update_lists()
 
@@ -1066,12 +1193,15 @@ class Application:
 
     def update_lists(self):
         self.dashboard.update_history(self.workspace.history())
-        self.dashboard.update_pins(self.pin_windows)
+        self.dashboard.update_pins(self.pin_windows, self.group)
 
     def history_action(self, action, item_id):
         if action == "clear":
-            result = QMessageBox.question(self.dashboard, self.tr("Clear screenshot history", "清空截图历史"),
-                                          self.tr("Delete all screenshots stored in local history?", "删除本地历史中的全部截图？"))
+            result = QMessageBox.question(
+                self.dashboard, self.tr("Clear screenshot history", "清空截图历史"),
+                self.tr("Delete all screenshots stored in local history?", "删除本地历史中的全部截图？"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
+            )
             if result == QMessageBox.StandardButton.Yes:
                 self.workspace.clear_history()
                 self.update_lists()
@@ -1086,7 +1216,9 @@ class Application:
         if action == "preview":
             from .editor import ImageEditor
 
-            dialog = ImageEditor(image, locale=self.locale, options=self._annotation_options())
+            dialog = ImageEditor(image, locale=self.locale, options=self._annotation_options(),
+                                 apply_text=self.tr("Create floating pin", "新建悬浮贴图"))
+            dialog.setWindowTitle(self.tr("Screenshot history preview", "截图历史预览"))
             self._connect_annotation_settings(dialog.canvas)
             dialog.applied.connect(lambda updated: self.open_pin(updated))
             self.keep_dialog(dialog)
@@ -1100,7 +1232,7 @@ class Application:
         dialog.show()
         dialog.raise_()
 
-    def start_recognition(self, image, action, done=None):
+    def start_recognition(self, image, action, done=None, *, result_parent=None):
         import threading
 
         if self.recognition_jobs:
@@ -1108,7 +1240,7 @@ class Application:
             return
         self.job_id += 1
         job_id = self.job_id
-        self.recognition_jobs[job_id] = action, done
+        self.recognition_jobs[job_id] = action, done, result_parent
         self.status(self.tr("Recognizing locally…", "正在离线识别…"))
         image = image.copy()
         provider = self.workspace.get("ocr_provider") if action in {"ocr", "ocr-copy"} else "local"
@@ -1130,21 +1262,30 @@ class Application:
         threading.Thread(target=run, daemon=True).start()
 
     def recognition_finished(self, job_id, text, error):
-        action, done = self.recognition_jobs.pop(job_id)
+        action, done, result_parent = self.recognition_jobs.pop(job_id)
         if error or not text:
-            self.failure(error or self.tr("No text or code was recognized.", "未识别到文字或条码。"), done)
+            message = error or self.tr("No text or code was recognized.", "未识别到文字或条码。")
+            if result_parent is not None:
+                done(code=1, error=message)
+            else:
+                self.failure(message, done)
             return
-        if done:
-            done(code=0, text=text)
+        if done and done(code=0, text=text) is False:
+            return
         if action in {"ocr-copy", "barcode-copy"}:
             self.qt.clipboard().setText(text)
             self.notify(self.tr("Recognized text copied", "识别结果已复制"))
             return
-        dialog = QDialog(self.dashboard if self.dashboard.isVisible() else None)
+        if result_parent is None and self.dashboard.isVisible():
+            result_parent = self.dashboard
+        dialog = QDialog(result_parent)
+        if result_parent is self.editor and result_parent is not None:
+            dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setWindowTitle(self.tr("Recognition result", "识别结果"))
         dialog.resize(540, 330)
         layout = QVBoxLayout(dialog)
-        edit = QTextEdit(text)
+        edit = QTextEdit()
+        edit.setPlainText(text)
         layout.addWidget(edit)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         copy = buttons.addButton(self.tr("Copy text", "复制文字"), QDialogButtonBox.ButtonRole.ActionRole)
@@ -1153,9 +1294,11 @@ class Application:
         layout.addWidget(buttons)
         self.keep_dialog(dialog)
 
-    def scroll_capture(self, initial, region, done, *, restore_dashboard=False):
+    def scroll_capture(self, initial, region, done, *, restore_dashboard=False, hidden_pins=()):
         from .capture import CaptureError, capture_desktop
 
+        self.capturing = True
+        hidden_pins = list(hidden_pins)
         current = initial
         initial_dpr = initial.devicePixelRatio()
         dialog = QDialog(None, Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
@@ -1166,6 +1309,7 @@ class Application:
         note.setWordWrap(True)
         layout.addWidget(note)
         status = QLabel(f"{current.width()} × {current.height()}")
+        status.setTextFormat(Qt.TextFormat.PlainText)
         status.setWordWrap(True)
         layout.addWidget(status)
         buttons = QHBoxLayout()
@@ -1181,8 +1325,11 @@ class Application:
         dialog.move(display.availableGeometry().topLeft() + QPoint(8, 8))
 
         def next_frame():
+            if not dialog.isVisible():
+                return
             disable_capture_window_transitions(dialog)
             dialog.hide()
+            hidden_pins.extend(pin for pin in self.hide_capture_pins() if pin not in hidden_pins)
 
             def grab():
                 nonlocal current
@@ -1206,24 +1353,38 @@ class Application:
             QTimer.singleShot(130, grab)
 
         def finish(action):
-            dialog.accept()
-            self.output(current, action, region, done)
+            def complete(code=0, text="", error=""):
+                if code:
+                    return
+                self.last_region = QRect(region)
+                dialog.accept()
+                if done:
+                    done(code=0, text=text)
+
+            self.output(current, action, region, complete, dialog_parent=dialog, on_error=status.setText)
+
+        def close_scroll(result):
+            self.capturing = False
+            self.restore_capture_pins(hidden_pins)
+            if restore_dashboard or not QSystemTrayIcon.isSystemTrayAvailable():
+                self.dashboard.show()
+            if done and result == QDialog.DialogCode.Rejected:
+                done(code=1, error="Scrolling capture cancelled.")
 
         add.clicked.connect(next_frame)
         save.clicked.connect(lambda: finish("save"))
         copy.clicked.connect(lambda: finish("copy"))
         pin.clicked.connect(lambda: finish("pin"))
-        if done:
-            dialog.rejected.connect(lambda: done(code=1, error="Scrolling capture cancelled."))
-        if restore_dashboard or not QSystemTrayIcon.isSystemTrayAvailable():
-            dialog.finished.connect(lambda: self.dashboard.show())
+        dialog.finished.connect(close_scroll)
         self.keep_dialog(dialog)
 
     def settings(self):
-        dialog = Preferences(self.workspace, self.tr, self.dashboard if self.dashboard.isVisible() else None)
+        dialog = Preferences(self.workspace, self.tr, self.dashboard if self.dashboard.isVisible() else None,
+                             apply_hotkeys=self.apply_hotkeys)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         values = dialog.values()
+        super_snip_changed = values["super_snip"] != self.workspace.get("super_snip")
         if values["run_at_login"] != self.workspace.get("run_at_login"):
             try:
                 self.set_login(values["run_at_login"])
@@ -1232,8 +1393,8 @@ class Application:
                 self.notify(str(error), error=True)
         for key, value in values.items():
             self.workspace.set(key, value)
-        self.configure_hotkeys()
-        self.configure_super_snip()
+        if super_snip_changed:
+            self.configure_super_snip()
         self.update_lists()
 
     def set_login(self, enabled):
@@ -1383,7 +1544,7 @@ class Application:
         elif command == "hide":
             self.dashboard.hide()
         elif command == "restore-pins":
-            self.recover_pins()
+            self.recover_pins(show=True)
         elif command in {"show-images", "hide-images"}:
             for window in self.pin_windows.values():
                 if window.state["group"] == self.group:
@@ -1394,8 +1555,7 @@ class Application:
         elif command == "toggle-click-through":
             self.toggle_click_through()
         elif command == "no-click-through":
-            for window in self.pin_windows.values():
-                window.set_state("click_through", False)
+            self.disable_click_through()
         elif command == "show-tray-menu":
             self.tray_menu.popup(QCursor.pos())
         elif command == "clear-snip-history":
@@ -1455,16 +1615,21 @@ class Application:
             user32.keybd_event(key, 0, flags, 0)
 
     def help(self):
+        shortcuts = self.workspace.get("hotkeys")
+        capture = shortcuts.get("capture") if self.hotkeys_enabled and "capture" not in self.hotkeys.unavailable else None
+        paste = shortcuts.get("paste") if self.hotkeys_enabled and "paste" not in self.hotkeys.unavailable else None
+        capture_hint = self.tr(f"Press {capture} to capture a region.", f"按 {capture} 开始区域截图。") if capture else self.tr(
+            "Choose Capture region from the main window or tray.", "可从主窗口或托盘选择「区域截图」。")
+        paste_hint = self.tr(f"Press {paste} to pin clipboard content.", f"按 {paste} 悬浮剪贴板内容。") if paste else self.tr(
+            "Choose Pin clipboard content from the main window or tray.", "可从主窗口或托盘选择「悬浮剪贴板内容」。")
         QMessageBox.information(
             self.dashboard, "Snaploom",
-            self.tr("F1 captures a region. Enter copies the screenshot. F3 pins clipboard content above other windows. "
-                    "Use Restore last hidden pin to show a pin you previously hid. "
-                    "Hold Alt during capture to magnify. "
-                    "Open Settings to customize these shortcuts. The More menu includes offline text and barcode recognition.",
-                    "F1 区域截图，回车复制，F3 将剪贴板内容悬浮在其他窗口上方。"
-                    "要重新显示隐藏的贴图，可点「恢复最近隐藏的贴图」。"
-                    "截图时按住 Alt 查看放大镜。"
-                    "可在设置中更改快捷键，截图工具栏的「更多」提供离线文字和条码识别。"),
+            "\n".join((capture_hint, paste_hint, self.tr(
+                "On the screenshot canvas, Enter confirms the selection or copies it once selected. "
+                "Restore last hidden pin brings back a pin you hid earlier. Change shortcuts in Settings.",
+                "在截图画布中，回车可确认框选或复制已确认的选区。"
+                "「恢复最近隐藏的贴图」可重新显示收起的小窗。可在设置中修改快捷键。",
+            ))),
         )
 
     def shutdown(self):

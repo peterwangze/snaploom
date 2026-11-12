@@ -4,7 +4,7 @@ from unittest.mock import patch
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QColorDialog, QMenu, QStyle, QStyleOptionSpinBox
+from PySide6.QtWidgets import QApplication, QColorDialog, QMenu, QStyle, QStyleOptionSpinBox, QToolButton
 
 from snaploom.capture import Snapshot
 from snaploom.editor import CaptureEditor, ImageEditor
@@ -18,12 +18,13 @@ class EditorControlTests(unittest.TestCase):
             raise unittest.SkipTest("Use QT_QPA_PLATFORM=offscreen to isolate capture editor interactions.")
         cls.qt.setQuitOnLastWindowClosed(False)
 
-    def open_editor(self, geometry=None, **options):
+    def open_editor(self, geometry=None, *, history=(), **options):
         bounds = geometry or self.qt.primaryScreen().availableGeometry()
         image = QImage(bounds.size(), QImage.Format.Format_RGB32)
         image.fill(Qt.GlobalColor.white)
         selection = QRect(bounds.topLeft() + QPoint(22, 30), bounds.size() / 2)
-        editor = CaptureEditor(Snapshot(image, bounds), selection=selection, options={"locale": "zh-CN", **options})
+        editor = CaptureEditor(Snapshot(image, bounds), selection=selection, history=history,
+                               options={"locale": "zh-CN", **options})
         self.addCleanup(self.close_widget, editor)
         editor.show()
         self.qt.processEvents()
@@ -373,6 +374,153 @@ class EditorControlTests(unittest.TestCase):
         self.assertEqual(editor.document.annotations, ())
         self.click(editor.undo_button)
         self.assertEqual(editor.document.annotations, before)
+
+    def test_escape_cancels_active_selection_gestures_before_closing(self):
+        editor = self.open_editor()
+        window = editor.windowHandle()
+        original = editor.selected_geometry()
+        start, end = QPoint(126, 76), QPoint(193, 132)
+        QTest.mouseMove(window, start)
+        QTest.keyClick(window, Qt.Key.Key_Space)
+        QTest.mouseMove(window, end)
+        self.assertEqual(editor.selected_geometry(), QRect(editor.mapToGlobal(start), editor.mapToGlobal(end)))
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertEqual(editor.selected_geometry(), original)
+        self.assertTrue(editor.toolbar.isVisible())
+
+        edge = editor.selection.topLeft()
+        QTest.mousePress(window, Qt.MouseButton.LeftButton, pos=edge)
+        QTest.mouseMove(window, edge + QPoint(20, 20))
+        self.assertNotEqual(editor.selected_geometry(), original)
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        QTest.mouseRelease(window, Qt.MouseButton.LeftButton, pos=edge + QPoint(20, 20))
+        self.assertEqual(editor.selected_geometry(), original)
+        self.assertTrue(editor.toolbar.isVisible())
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertFalse(editor.isVisible())
+
+    def test_region_history_starts_at_latest_then_moves_to_older_regions(self):
+        history = [QRect(34, 50, 110, 80), QRect(90, 60, 140, 120), QRect(220, 100, 250, 130)]
+        editor = self.open_editor(history=history)
+        window = editor.windowHandle()
+        original = editor.selected_geometry()
+        QTest.keyClick(window, Qt.Key.Key_Period)
+        self.assertEqual(editor.selected_geometry(), original)
+        for expected in (*history, history[-1]):
+            QTest.keyClick(window, Qt.Key.Key_Comma)
+            self.assertEqual(editor.selected_geometry(), expected)
+        for expected in (history[1], history[0], history[0]):
+            QTest.keyClick(window, Qt.Key.Key_Period)
+            self.assertEqual(editor.selected_geometry(), expected)
+
+    def test_redaction_stays_on_original_pixels_when_selection_is_reframed(self):
+        editor = self.open_editor()
+        window = editor.windowHandle()
+        self.click(editor.tool_buttons["redact"])
+        with patch.object(QColorDialog, "getColor", return_value=QColor("#000000")) as choose:
+            self.click(editor.color_button)
+        self.assertFalse(choose.call_args.args[-1] & QColorDialog.ColorDialogOption.ShowAlphaChannel)
+        self.drag(editor, QPoint(95, 75), QPoint(145, 135))
+        sample = editor.mapToGlobal(QPoint(120, 101))
+
+        def color_at_original_position():
+            return editor.export_image().pixelColor(sample - editor.selected_geometry().topLeft())
+
+        self.assertEqual(color_at_original_position(), QColor("#000000"))
+        self.click(editor.tool_buttons["select"])
+        edge = QPoint(editor.selection.left(), editor.selection.center().y())
+        self.drag(editor, edge, edge + QPoint(43, 0))
+        self.assertEqual(editor.selection.left(), edge.x() + 43)
+        self.assertEqual(color_at_original_position(), QColor("#000000"))
+        QTest.keyClick(window, Qt.Key.Key_Right, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(color_at_original_position(), QColor("#000000"))
+        self.click(editor.undo_button)
+        self.assertEqual(color_at_original_position(), QColor("#ffffff"))
+        self.click(editor.redo_button)
+        self.assertEqual(color_at_original_position(), QColor("#000000"))
+
+    def test_locked_ratio_holds_when_drawing_or_resizing_against_screen_edge(self):
+        editor = self.open_editor(QRect(0, 0, 550, 400), aspect_ratio=2)
+        self.drag(editor, QPoint(340, 155), QPoint(549, 390))
+        self.assertEqual(editor.selection, QRect(340, 155, 210, 105))
+        edge = editor.selection.bottomRight()
+        self.drag(editor, edge, edge + QPoint(0, 38))
+        self.assertEqual(editor.selection, QRect(340, 155, 210, 105))
+
+    def test_redo_uses_configured_shortcut_instead_of_default_alternate(self):
+        editor = self.open_editor(shortcuts={"redo": "Ctrl+J"})
+        self.click(editor.tool_buttons["rectangle"])
+        self.drag(editor, QPoint(43, 52), QPoint(85, 93))
+        first = editor.document.annotations
+        self.click(editor.undo_button)
+        QTest.keyClick(editor.windowHandle(), Qt.Key.Key_Y, Qt.KeyboardModifier.ControlModifier)
+        self.assertFalse(editor.document.annotations)
+        QTest.keyClick(editor.windowHandle(), Qt.Key.Key_J, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(editor.document.annotations, first)
+
+    def test_reselecting_polyline_does_not_finish_the_current_draft(self):
+        editor = self.open_editor()
+        line = editor.tool_buttons["line"]
+        self.click(line)
+        for point in (QPoint(101, 68), QPoint(127, 98)):
+            self.click(editor, point)
+        self.click(line)
+        self.assertTrue(line.isChecked())
+        self.assertEqual(len(editor.line_points), 2)
+        self.assertFalse(editor.document.annotations)
+        QTest.keyClick(editor.windowHandle(), Qt.Key.Key_Return)
+        self.assertEqual(len(editor.document.annotations), 1)
+        self.assertFalse(editor.line_points)
+
+    def test_undo_and_redo_of_a_number_restore_the_next_step_number(self):
+        editor = self.open_editor()
+        self.click(editor.tool_buttons["number"])
+        self.type_number(editor.number_spin, 12)
+        self.click(editor, QPoint(100, 90))
+        self.assertEqual(editor.number_spin.value(), 13)
+        self.click(editor.undo_button)
+        self.assertEqual(editor.number_spin.value(), 12)
+        self.click(editor.redo_button)
+        self.assertEqual(editor.number_spin.value(), 13)
+        self.assertEqual(editor.document.annotations[0].text, "12")
+
+    def test_disabled_capture_modes_have_no_refresh_or_scroll_entry(self):
+        editor = self.open_editor(allow_refresh=False, allow_scroll=False)
+        refreshed = []
+        editor.refresh_requested.connect(lambda: refreshed.append(True))
+        QTest.keyClick(editor.windowHandle(), Qt.Key.Key_F5)
+        self.assertEqual(refreshed, [])
+        more = next(button for button in editor.toolbar.findChildren(QToolButton) if button.text() == "更多")
+        labels = {action.text() for action in more.menu().actions()}
+        self.assertNotIn("刷新截图", labels)
+        self.assertNotIn("滚动截图", labels)
+
+    def test_context_menu_actions_follow_the_clicked_annotation(self):
+        editor = self.open_editor()
+        self.click(editor.tool_buttons["pen"])
+        self.drag(editor, QPoint(65, 70), QPoint(100, 90))
+
+        def actions_at(point):
+            labels = []
+
+            def dismiss():
+                menu = self.qt.activePopupWidget()
+                if isinstance(menu, QMenu):
+                    labels.extend(action.text() for action in menu.actions())
+                    menu.hide()
+
+            QTimer.singleShot(0, dismiss)
+            QTest.mouseClick(editor.windowHandle(), Qt.MouseButton.RightButton, pos=point)
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            self.assertFalse(editor.findChildren(QMenu, options=Qt.FindChildOption.FindDirectChildrenOnly))
+            return labels
+
+        marked = actions_at(QPoint(78, 79))
+        self.assertIn("删除所选标注", marked)
+        self.assertNotIn("向左旋转所选", marked)
+        blank = actions_at(QPoint(200, 120))
+        self.assertIn("清空全部标注", blank)
+        self.assertNotIn("删除所选标注", blank)
 
     def test_toolbar_controls_are_reachable_on_a_small_screen(self):
         screen_bounds = self.qt.primaryScreen().availableGeometry()

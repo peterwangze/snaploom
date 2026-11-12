@@ -5,21 +5,29 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeySequence
+from PySide6.QtCore import QItemSelectionModel, QSize, Qt, Signal
+from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton,
-    QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .capture import disable_capture_window_transitions
-from .hotkeys import LABELS
+from .hotkeys import LABELS, editor_key_for_hotkey, parse
+from .storage import DEFAULTS
 
 
 HOTKEY_ZH = {
     "capture": "区域截图", "paste": "悬浮剪贴板内容", "toggle_pins": "显示或隐藏贴图",
     "repeat": "重复上次区域", "click_through": "切换贴图鼠标穿透", "active": "截取当前窗口",
+}
+EDITOR_ACTIONS = {
+    "copy": ("Copy screenshot", "复制截图"), "save": ("Save as…", "另存为…"),
+    "pin": ("Pin screenshot", "悬浮截图"), "quick-save": ("Quick save", "快速保存"),
+    "copy-file": ("Copy as image file", "复制为图像文件"), "refresh": ("Refresh screenshot", "刷新截图"),
+    "color": ("Copy pixel color", "复制像素颜色"), "undo": ("Undo step", "撤销一步"),
+    "redo": ("Redo step", "重做一步"),
 }
 
 
@@ -27,6 +35,7 @@ class Dashboard(QWidget):
     action = Signal(str)
     history_action = Signal(str, int)
     pin_action = Signal(str, int)
+    pin_delete_requested = Signal(list)
     files_dropped = Signal(list)
     closing = Signal()
 
@@ -54,10 +63,13 @@ class Dashboard(QWidget):
         self.tabs.addTab(self.home(), self.tr("Capture", "截图"))
         self.history_list = QListWidget()
         self.pin_list = QListWidget()
+        self._history_rows = None
+        self._list_wide_actions = {}
+        self.pin_list.setIconSize(QSize(56, 40))
         self.history_list.setAccessibleName(self.tr("Screenshot history", "截图历史"))
         self.pin_list.setAccessibleName(self.tr("Pinned references", "贴图"))
-        self.history_list.itemDoubleClicked.connect(lambda item: self.history_action.emit("preview", item.data(Qt.ItemDataRole.UserRole)))
-        self.pin_list.itemDoubleClicked.connect(lambda item: self.pin_action.emit("show", item.data(Qt.ItemDataRole.UserRole)))
+        self.history_list.itemActivated.connect(lambda item: self.history_action.emit("preview", item.data(Qt.ItemDataRole.UserRole)))
+        self.pin_list.itemActivated.connect(lambda item: self.pin_action.emit("show", item.data(Qt.ItemDataRole.UserRole)))
         history_page = self.list_page(self.history_list, [
             ("preview", "Preview", "预览"), ("copy", "Copy", "复制"), ("pin", "Pin", "贴图"),
             ("save", "Save", "保存"), ("delete", "Delete", "删除"), ("clear", "Clear history…", "清空历史…"),
@@ -78,6 +90,9 @@ class Dashboard(QWidget):
         self.status.setWordWrap(True)
         self.status.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         bottom.addWidget(self.status)
+        help_button = QPushButton(self.tr("Help", "操作帮助"))
+        help_button.clicked.connect(lambda: self.action.emit("help"))
+        bottom.addWidget(help_button)
         prefs = QPushButton(self.tr("Settings", "设置"))
         prefs.clicked.connect(lambda: self.action.emit("settings"))
         bottom.addWidget(prefs)
@@ -155,8 +170,20 @@ class Dashboard(QWidget):
         for action, en, zh in buttons:
             button = QPushButton(self.tr(en, zh))
             button.clicked.connect(lambda checked=False, selected=action: self.emit_selection(widget, selected, signal))
+            if action in {"clear", "recover"}:
+                self._list_wide_actions[widget] = button
+                button.setEnabled(False)
+            else:
+                def update_enabled(control=button, selected=action):
+                    count = len(widget.selectedItems())
+                    control.setEnabled(count == 1 if selected == "solo" else count > 0)
+                widget.itemSelectionChanged.connect(update_enabled)
+                update_enabled()
             row.addWidget(button)
         layout.addLayout(row)
+        delete_key = QShortcut(QKeySequence(Qt.Key.Key_Delete), widget)
+        delete_key.setContext(Qt.ShortcutContext.WidgetShortcut)
+        delete_key.activated.connect(lambda: self.emit_selection(widget, "delete", signal))
         return page
 
     def emit_selection(self, widget, action, signal):
@@ -167,30 +194,71 @@ class Dashboard(QWidget):
             signal.emit(action, current.data(Qt.ItemDataRole.UserRole) if current else -1)
             return
         ids = [item.data(Qt.ItemDataRole.UserRole) for item in widget.selectedItems()]
+        if widget is self.pin_list and action == "delete":
+            if ids:
+                self.pin_delete_requested.emit(ids)
+            return
         for item_id in ids:
             signal.emit(action, item_id)
 
     def update_history(self, rows):
+        if self._history_rows == rows:
+            return
+        self._history_rows = rows
+        selected = self.history_list.selectedItems()
+        selected_id = selected[0].data(Qt.ItemDataRole.UserRole) if selected else None
+        was_empty = not self.history_list.count()
         self.history_list.clear()
-        for item_id, timestamp, region, action in rows:
+        actions = {
+            "copy": ("Copied", "已复制"), "pin": ("Pinned", "已贴图"),
+            "save": ("Saved", "已保存"), "saved": ("Saved", "已保存"),
+            "quick-save": ("Quick saved", "已快速保存"), "copy-file": ("File copied", "已复制为文件"),
+            "print": ("Printed", "已打印"), "ocr": ("Text recognized", "已识别文字"),
+            "barcode": ("Code scanned", "已识别条码"),
+        }
+        for item_id, timestamp, _, action in rows:
             stamp = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-            item = QListWidgetItem(f"{stamp}    {action}")
+            label = self.tr(*actions.get(action, ("Exported", "已输出")))
+            item = QListWidgetItem(f"{stamp}    ·    {label}")
             item.setData(Qt.ItemDataRole.UserRole, item_id)
             self.history_list.addItem(item)
-        if self.history_list.count():
+            if item_id == selected_id:
+                self.history_list.setCurrentItem(item)
+        if was_empty and self.history_list.count():
             self.history_list.setCurrentRow(0)
+        self._list_wide_actions[self.history_list].setEnabled(bool(rows))
 
-    def update_pins(self, pins):
+    def update_pins(self, pins, current_group):
         selected = {item.data(Qt.ItemDataRole.UserRole) for item in self.pin_list.selectedItems()}
+        current = self.pin_list.currentItem()
+        current_id = current.data(Qt.ItemDataRole.UserRole) if current else None
+        was_empty = not self.pin_list.count()
         self.pin_list.clear()
         for pin_id, window in pins.items():
-            label = self.tr("Visible", "已显示") if window.isVisible() else self.tr("Hidden", "已隐藏")
-            item = QListWidgetItem(f'{window.state["group"]}    ·    {window.image.width()} × {window.image.height()}    ·    {label}')
+            group = window.state["group"]
+            if window.isVisible():
+                label = self.tr("Visible", "已显示")
+            elif not window.state["visible"]:
+                label = self.tr("Hidden individually", "已单独隐藏")
+            elif group != current_group:
+                label = self.tr("In another group", "位于其他分组")
+            else:
+                label = self.tr("Temporarily hidden", "暂时隐藏")
+            source = " ".join(window.state.get("source_text", "").split())
+            detail = f"{window.image.width()} × {window.image.height()}"
+            if source:
+                detail = source[:71] + "…" if len(source) > 72 else source
+            thumbnail = window.view.scaled(self.pin_list.iconSize(), Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation)
+            item = QListWidgetItem(QIcon(QPixmap.fromImage(thumbnail)), f"{detail}    ·    {group}    ·    {label}")
             item.setData(Qt.ItemDataRole.UserRole, pin_id)
             self.pin_list.addItem(item)
+            if pin_id == current_id:
+                self.pin_list.setCurrentItem(item, QItemSelectionModel.SelectionFlag.NoUpdate)
             item.setSelected(pin_id in selected)
-        if self.pin_list.count() and not self.pin_list.selectedItems():
+        if was_empty and self.pin_list.count():
             self.pin_list.setCurrentRow(0)
+        self._list_wide_actions[self.pin_list].setEnabled(bool(pins))
 
     def showEvent(self, event):
         disable_capture_window_transitions(self)
@@ -212,10 +280,17 @@ class Dashboard(QWidget):
 
 
 class Preferences(QDialog):
-    def __init__(self, workspace, translate, parent):
+    def __init__(self, workspace, translate, parent, *, apply_hotkeys=None):
         super().__init__(parent)
+        from .editor import DEFAULT_EDITOR_SHORTCUTS, TOOLS
+
         self.tr = translate
         self.workspace = workspace
+        self.apply_hotkeys = apply_hotkeys
+        self.editor_defaults = DEFAULT_EDITOR_SHORTCUTS
+        self.editor_labels = {tool: self.tr(en, zh) for tool, en, zh, _ in TOOLS} | {
+            name: self.tr(en, zh) for name, (en, zh) in EDITOR_ACTIONS.items()
+        }
         self.setWindowTitle(self.tr("Snaploom settings", "Snaploom 设置"))
         self.resize(550, 470)
         layout = QVBoxLayout(self)
@@ -231,7 +306,7 @@ class Preferences(QDialog):
             ("include_cursor", "Include the cursor in screenshots", "截图包含鼠标指针"),
             ("restore_pins", "Reopen visible pins on startup", "启动时重新显示上次可见的贴图"),
             ("hide_pins_on_capture", "Hide pins during capture", "截图时隐藏贴图"),
-            ("run_at_login", "Start at sign-in", "登录时启动"),
+            ("run_at_login", "Start in the background at sign-in", "登录时在后台启动"),
             ("start_hidden", "Start in the tray", "启动后收起到托盘"),
             ("allow_remote_images", "Fetch images from clipboard URLs", "允许下载剪贴板网址中的图像"),
             ("show_grid", "Show selection guides", "显示选区参考线"),
@@ -243,7 +318,7 @@ class Preferences(QDialog):
             form.addRow(box)
             self.fields[key] = box
         for key, en, zh, minimum, maximum in (
-            ("history_limit", "History items (0 disables)", "历史条数（0 为关闭）", 0, 1000),
+            ("history_limit", "History limit (0 clears and disables)", "历史条数上限（0 清空并关闭）", 0, 1000),
             ("default_pin_opacity", "Default pin opacity (%)", "贴图默认不透明度 (%)", 10, 100),
         ):
             spin = QSpinBox()
@@ -314,8 +389,6 @@ class Preferences(QDialog):
         for key, en, zh, values in (
             ("format", "Image format", "图像格式", ("png", "jpg", "webp", "bmp")),
             ("color_format", "Color picker format", "取色格式", ("HEX", "RGB", "HSL", "HSV", "CMYK")),
-            ("hot_corner", "Capture by dwelling in a screen corner", "鼠标停留触发截图", ("", "top-left", "top-right", "bottom-left", "bottom-right")),
-            ("super_snip", "Modifier + right-drag to capture", "修饰键 + 右键拖拽截图", ("", "alt", "ctrl", "shift", "super")),
         ):
             combo = QComboBox()
             combo.addItems(values)
@@ -324,17 +397,36 @@ class Preferences(QDialog):
             self.fields[key] = combo
         shortcuts = QWidget()
         shortcut_form = QFormLayout(shortcuts)
-        tabs.addTab(shortcuts, self.tr("Shortcuts", "快捷键"))
+        tabs.addTab(shortcuts, self.tr("Global shortcuts", "全局快捷键"))
         self.shortcuts = {}
         for action, label in LABELS.items():
             field = QLineEdit(workspace.get("hotkeys").get(action, ""))
             field.setPlaceholderText(self.tr("Disabled", "未设置"))
             shortcut_form.addRow(self.tr(label, HOTKEY_ZH[action]), field)
             self.shortcuts[action] = field
-        hint = QLabel(self.tr("Examples: F1, Shift+F3, Ctrl+Alt+S. Leave blank to disable.",
-                              "例如 F1、Shift+F3、Ctrl+Alt+S。留空即禁用。"))
+        hint = QLabel(self.tr("Global shortcuts work even while another app is active. Leave a field blank to disable it.",
+                              "全局快捷键在使用其他应用时也能触发。留空即可禁用对应操作。"))
         hint.setWordWrap(True)
         shortcut_form.addRow(hint)
+        for key, en, zh, choices in (
+            ("hot_corner", "Pause in a corner to capture", "鼠标停留触发截图", (
+                ("", "Off", "关闭"), ("top-left", "Top left", "左上角"), ("top-right", "Top right", "右上角"),
+                ("bottom-left", "Bottom left", "左下角"), ("bottom-right", "Bottom right", "右下角"),
+            )),
+            ("super_snip", "Modifier + right-drag to capture", "修饰键 + 右键拖拽截图", (
+                ("", "Off", "关闭"), ("alt", "Alt / Option", "Alt / Option"), ("ctrl", "Ctrl", "Ctrl"),
+                ("shift", "Shift", "Shift"), ("super", "Windows / Command / Super", "Windows / Command / Super"),
+            )),
+        ):
+            combo = QComboBox()
+            for value, english, chinese in choices:
+                combo.addItem(self.tr(english, chinese), value)
+            combo.setCurrentIndex(max(0, combo.findData(workspace.get(key))))
+            shortcut_form.addRow(self.tr(en, zh), combo)
+            self.fields[key] = combo
+        reset_global = QPushButton(self.tr("Restore default global shortcuts", "恢复默认全局快捷键"))
+        reset_global.clicked.connect(lambda: self.reset_shortcuts(self.shortcuts, DEFAULTS["hotkeys"]))
+        shortcut_form.addRow(reset_global)
         commands = QWidget()
         command_layout = QVBoxLayout(commands)
         tabs.addTab(commands, self.tr("Custom outputs", "自定义输出"))
@@ -354,20 +446,29 @@ class Preferences(QDialog):
         command_layout.addWidget(self.commands, 1)
         editor = QWidget()
         editor_layout = QVBoxLayout(editor)
-        tabs.addTab(editor, self.tr("Editor keys", "编辑器快捷键"))
+        tabs.addTab(editor, self.tr("Editor shortcuts", "编辑器快捷键"))
         editor_help = QLabel(self.tr(
-            "Enter one action = key per line. Example: rectangle = R. "
-            "Actions include copy, save, pin, quick-save, refresh, pen, arrow, rectangle, text, mosaic and blur.",
-            "每行填写一项「动作 = 按键」，例如 rectangle = R。"
-            "可配置 copy、save、pin、quick-save、refresh、pen、arrow、rectangle、text、mosaic、blur 等动作。",
+            "Edit one key combination per action, for example R or Ctrl+Shift+S. Leave blank to disable that shortcut.",
+            "每个操作可设置一个组合键，例如 R 或 Ctrl+Shift+S。留空即可禁用对应快捷键。",
         ))
         editor_help.setWordWrap(True)
         editor_layout.addWidget(editor_help)
-        self.editor_shortcuts = QPlainTextEdit()
-        self.editor_shortcuts.setPlainText("\n".join(
-            f"{name} = {shortcut}" for name, shortcut in workspace.get("editor_shortcuts").items()
-        ))
-        editor_layout.addWidget(self.editor_shortcuts, 1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        editor_fields = QWidget()
+        editor_form = QFormLayout(editor_fields)
+        scroll.setWidget(editor_fields)
+        self.editor_shortcuts = {}
+        editor_values = self.editor_defaults | workspace.get("editor_shortcuts")
+        for action in self.editor_defaults:
+            field = QLineEdit(editor_values[action])
+            field.setPlaceholderText(self.tr("Disabled", "未设置"))
+            editor_form.addRow(self.editor_labels[action], field)
+            self.editor_shortcuts[action] = field
+        editor_layout.addWidget(scroll, 1)
+        reset_editor = QPushButton(self.tr("Restore default editor shortcuts", "恢复默认编辑器快捷键"))
+        reset_editor.clicked.connect(lambda: self.reset_shortcuts(self.editor_shortcuts, self.editor_defaults))
+        editor_layout.addWidget(reset_editor)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -379,6 +480,11 @@ class Preferences(QDialog):
         if selected:
             field.setText(selected)
 
+    @staticmethod
+    def reset_shortcuts(fields, defaults):
+        for action, field in fields.items():
+            field.setText(defaults[action])
+
     def values(self):
         data = {}
         for key, widget in self.fields.items():
@@ -387,36 +493,123 @@ class Preferences(QDialog):
             elif isinstance(widget, QSpinBox):
                 data[key] = widget.value()
             elif isinstance(widget, QComboBox):
-                data[key] = widget.currentData() if key == "ocr_provider" else widget.currentText()
+                data[key] = widget.currentData() if widget.currentData() is not None else widget.currentText()
             else:
                 data[key] = widget.text().strip()
         data["hotkeys"] = {key: field.text().strip() for key, field in self.shortcuts.items()}
+        data["editor_shortcuts"] = {key: field.text().strip() for key, field in self.editor_shortcuts.items()
+                                    if field.text().strip() != self.editor_defaults[key]}
         if self.clear_annotation_styles.isChecked():
             data["annotation_styles"] = {}
-        for key, field in (("custom_commands", self.commands), ("editor_shortcuts", self.editor_shortcuts)):
-            entries = {}
-            for line in field.toPlainText().splitlines():
-                name, separator, value = line.partition("=")
-                if separator and name.strip() and (value.strip() or key == "editor_shortcuts"):
-                    entries[name.strip()] = value.strip()
-            data[key] = entries
+        commands = {}
+        for line in self.commands.toPlainText().splitlines():
+            name, _, command = (part.strip() for part in line.partition("="))
+            if name and command:
+                commands[name] = command
+        data["custom_commands"] = commands
         return data
 
-    def accept(self):
-        from .editor import DEFAULT_EDITOR_SHORTCUTS
+    def warn_field(self, field, message):
+        QMessageBox.warning(self, self.windowTitle(), message)
+        tabs = self.findChild(QTabWidget)
+        page = next(tabs.widget(index) for index in range(tabs.count()) if tabs.widget(index).isAncestorOf(field))
+        tabs.setCurrentWidget(page)
+        field.setFocus()
+        if isinstance(field, QLineEdit):
+            field.selectAll()
 
-        updates = self.values()["editor_shortcuts"]
-        keys = DEFAULT_EDITOR_SHORTCUTS | updates
+    def validate_shortcuts(self, data):
+        reserved = {"Esc", "Return", "Enter", "Space", "Del", "Backspace", "Tab", "Backtab", "Shift+Tab",
+                    "Ctrl+A", "Ctrl+M", "Alt", ",", "."}
+        reserved.update(modifier + direction for direction in ("Left", "Right", "Up", "Down")
+                        for modifier in ("", "Shift+", "Ctrl+", "Ctrl+Shift+"))
         used = {}
-        for action, value in keys.items():
+        editor_values = self.editor_defaults | data["editor_shortcuts"]
+        saved_editor = self.editor_defaults | self.workspace.get("editor_shortcuts")
+        for action, value in editor_values.items():
             if not value:
                 continue
             sequence = QKeySequence.fromString(value, QKeySequence.SequenceFormat.PortableText)
             normalized = sequence.toString(QKeySequence.SequenceFormat.PortableText)
-            if not normalized or sequence.count() != 1 or normalized in used:
-                QMessageBox.warning(self, self.tr("Editor shortcuts", "编辑器快捷键"),
-                                    self.tr(f"Invalid or duplicate shortcut for {action}: {value}",
-                                            f"{action} 的快捷键无效或重复：{value}"))
-                return
+            label = self.editor_labels[action]
+            if sequence.count() != 1 or sequence[0].key() == Qt.Key.Key_unknown:
+                return self.editor_shortcuts[action], self.tr(f"Enter one valid shortcut for {label}.",
+                                                              f"请为「{label}」填写一个有效的快捷键。")
+            if normalized in reserved:
+                return self.editor_shortcuts[action], self.tr(f"{value} is reserved by the editor.",
+                                                              f"{value} 已用于编辑器的固定操作。")
+            if normalized in used:
+                previous = used[normalized]
+                if value == saved_editor[action] and editor_values[previous] != saved_editor[previous]:
+                    action, previous = previous, action
+                other = self.editor_labels[previous]
+                return self.editor_shortcuts[action], self.tr(f"{value} is already assigned to {other}.",
+                                                              f"{value} 已分配给「{other}」。")
             used[normalized] = action
+        if used.get(self.editor_defaults["redo"]) == "redo":
+            used.setdefault("Ctrl+Y", "redo")
+
+        global_keys = {}
+        saved_global = self.workspace.get("hotkeys")
+        for action, value in data["hotkeys"].items():
+            if not value:
+                continue
+            field = self.shortcuts[action]
+            label = self.tr(LABELS[action], HOTKEY_ZH[action])
+            try:
+                modifiers, key, code = parse(value)
+            except ValueError:
+                return field, self.tr(f"Enter a valid global shortcut for {label}, such as F1 or Ctrl+Alt+S.",
+                                      f"请为「{label}」填写有效的全局快捷键，例如 F1 或 Ctrl+Alt+S。")
+            identity = frozenset(modifiers), code
+            if identity in global_keys:
+                previous = global_keys[identity]
+                if value == saved_global[action] and data["hotkeys"][previous] != saved_global[previous]:
+                    action, previous = previous, action
+                other = self.tr(LABELS[previous], HOTKEY_ZH[previous])
+                return self.shortcuts[action], self.tr(f"{value} is already assigned to {other}.",
+                                                       f"{value} 已分配给「{other}」。")
+            global_keys[identity] = action
+            portable = editor_key_for_hotkey(modifiers, key)
+            normalized = QKeySequence.fromString(portable, QKeySequence.SequenceFormat.PortableText).toString(
+                QKeySequence.SequenceFormat.PortableText)
+            if normalized in used or normalized in reserved:
+                editor_action = used.get(normalized)
+                if editor_action and value == saved_global[action] and editor_values[editor_action] != saved_editor[editor_action]:
+                    return self.editor_shortcuts[editor_action], self.tr(f"{value} is already assigned globally to {label}.",
+                                                                         f"{value} 已分配给全局操作「{label}」。")
+                return field, self.tr(f"{value} would intercept an editor shortcut. Choose a different global shortcut.",
+                                      f"{value} 会拦截编辑器中的操作，请选择其他全局快捷键。")
+        return None
+
+    def accept(self):
+        data = self.values()
+        invalid = self.validate_shortcuts(data)
+        if invalid:
+            self.warn_field(*invalid)
+            return
+        commands = set()
+        for index, line in enumerate(self.commands.toPlainText().splitlines(), 1):
+            if not line.strip():
+                continue
+            name, _, command = (part.strip() for part in line.partition("="))
+            if not name or not command or name in commands:
+                self.warn_field(self.commands, self.tr(f"Custom output line {index} needs a unique name and a command.",
+                                                       f"自定义输出的第 {index} 行需要唯一的名称和命令。"))
+                return
+            commands.add(name)
+        removed = self.workspace.history_count() - data["history_limit"]
+        if removed > 0:
+            confirm = QMessageBox.question(
+                self, self.tr("Reduce screenshot history", "缩减截图历史"),
+                self.tr(f"Saving this limit will permanently remove the {removed} oldest screenshots from local history.",
+                        f"保存此上限将永久删除本地历史中最早的 {removed} 张截图。"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+        if self.apply_hotkeys and (conflict := self.apply_hotkeys(data["hotkeys"])):
+            action, message = conflict
+            self.warn_field(self.shortcuts[action], message)
+            return
         super().accept()

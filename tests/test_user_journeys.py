@@ -111,6 +111,30 @@ class UserJourneyTests(unittest.TestCase):
         action = next(action for action in menu.actions() if action.text() == self.application.tr(en, zh))
         action.trigger()
 
+    def test_tray_click_opens_workspace_and_capture_is_explicit(self):
+        app = self.application
+        with patch.object(app, "capture") as capture:
+            for reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+                app.dashboard.hide()
+                app.tray.activated.emit(reason)
+                self.assertTrue(app.dashboard.isVisible())
+            capture.assert_not_called()
+            label = app.tr("Capture region", "区域截图")
+            action = next(action for action in app.tray_menu.actions() if action.text() == label)
+            action.trigger()
+            capture.assert_called_once_with({})
+
+    def test_workspace_help_uses_current_shortcuts_and_fallback_buttons(self):
+        app = self.application
+        shortcuts = app.workspace.get("hotkeys")
+        app.workspace.set("hotkeys", shortcuts | {"capture": "F8", "paste": ""})
+        with patch("snaploom.app.QMessageBox.information") as show:
+            self.click(self.button(app.dashboard, "Help", "操作帮助"))
+        text = show.call_args.args[-1]
+        self.assertIn("F8", text)
+        self.assertIn(app.tr("Pin clipboard content", "悬浮剪贴板内容"), text)
+        self.assertNotIn("F3", text)
+
     def test_editor_more_menu_closes_with_escape_without_cancelling_capture(self):
         editor = self.open_capture()
         self.select_region(editor)
@@ -159,6 +183,31 @@ class UserJourneyTests(unittest.TestCase):
         self.click(self.button(app.dashboard, "Delete", "删除"))
         self.assertEqual(app.workspace.history(), [])
         self.assertEqual(app.dashboard.history_list.count(), 0)
+
+    def test_history_keyboard_preview_keeps_the_selected_record_and_names_the_pin_action(self):
+        app = self.application
+        earlier = self.image.copy()
+        earlier.fill(QColor("#30805a"))
+        app.workspace.remember(earlier, self.selection, "copy")
+        app.workspace.remember(self.image, self.selection, "quick-save")
+        app.update_lists()
+        self.select_tab(1)
+        history = app.dashboard.history_list
+        point = history.visualItemRect(history.item(1)).center()
+        QTest.mouseClick(history.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        selected_id = history.currentItem().data(Qt.ItemDataRole.UserRole)
+        self.assertIn(app.tr("Copied", "已复制"), history.currentItem().text())
+
+        app.workspace.remember(self.image, self.selection, "pin")
+        app.update_lists()
+        self.assertEqual(history.currentItem().data(Qt.ItemDataRole.UserRole), selected_id)
+        history.setFocus()
+        QTest.keyClick(history, Qt.Key.Key_Return)
+        preview, = app.dialogs
+        self.assertEqual(preview.apply_button.text(), app.tr("Create floating pin", "新建悬浮贴图"))
+        self.assertEqual(preview.result_image.pixelColor(0, 0), earlier.pixelColor(0, 0))
+        QTest.keyClick(preview, Qt.Key.Key_Escape)
+        self.assertEqual(app.pin_windows, {})
 
     def test_save_cancel_keeps_selection_and_second_attempt_writes_file(self):
         editor = self.open_capture()
@@ -240,7 +289,8 @@ class UserJourneyTests(unittest.TestCase):
 
     def test_tray_capture_supports_keyboard_selection_and_copy(self):
         app = self.application
-        app.tray.activated.emit(QSystemTrayIcon.ActivationReason.Trigger)
+        label = app.tr("Capture region", "区域截图")
+        next(action for action in app.tray_menu.actions() if action.text() == label).trigger()
         self.until(lambda: app.editor is not None and app.editor.isVisible(), "Tray did not open the editor.")
         editor = app.editor
         start = QPoint(45, 54)
@@ -275,10 +325,11 @@ class UserJourneyTests(unittest.TestCase):
             def confirm():
                 try:
                     fields = dialog.findChildren(QSpinBox)
-                    self.assertEqual(len(fields), 4)
-                    for field, value in zip(fields, requested.getRect(), strict=True):
-                        field.setValue(value)
                     transparent = dialog.findChild(QCheckBox)
+                    values = requested.getRect() if transparent is None else (requested.width(), requested.height())
+                    self.assertEqual(len(fields), len(values))
+                    for field, value in zip(fields, values, strict=True):
+                        field.setValue(value)
                     if transparent is not None:
                         QTest.keyClick(transparent, Qt.Key.Key_Space)
                         self.assertTrue(transparent.isChecked())
@@ -339,7 +390,8 @@ class UserJourneyTests(unittest.TestCase):
         self.assertEqual(restored.image.pixelColor(12, 12), QColor("#f0f4f8"))
         self.select_tab(2)
         self.assertEqual(self.application.dashboard.pin_list.count(), 1)
-        self.click(self.button(self.application.dashboard, "Delete", "删除"))
+        with patch("snaploom.app.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+            self.click(self.button(self.application.dashboard, "Delete", "删除"))
         self.assertEqual(list(self.application.workspace.pins()), [])
 
     def test_clipboard_hotkey_creates_another_pin_when_the_same_content_is_hidden(self):
@@ -414,7 +466,8 @@ class UserJourneyTests(unittest.TestCase):
                 row = next(i for i in range(pin_list.count()) if pin_list.item(i).data(Qt.ItemDataRole.UserRole) == pin_id)
                 point = pin_list.visualItemRect(pin_list.item(row)).center()
                 QTest.mouseClick(pin_list.viewport(), Qt.MouseButton.LeftButton, pos=point)
-                self.click(self.button(app.dashboard, en, zh))
+                with patch("snaploom.app.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+                    self.click(self.button(app.dashboard, en, zh))
                 current_pins = set(app.pin_windows)
                 self.select_tab(0)
                 restore = self.button(app.dashboard, "Restore last hidden pin", "恢复最近隐藏的贴图")
@@ -455,6 +508,30 @@ class UserJourneyTests(unittest.TestCase):
         self.assertFalse(second.isVisible())
         self.click(restore)
         self.assertTrue(second.isVisible())
+
+    def test_pin_list_identifies_items_and_delete_requires_confirmation(self):
+        app = self.application
+        self.qt.clipboard().setText("Reference instructions")
+        self.click(self.button(app.dashboard, "Pin clipboard content", "悬浮剪贴板内容"))
+        pin_id, = app.pin_windows
+        self.select_tab(2)
+        pins = app.dashboard.pin_list
+        self.assertIn("Reference instructions", pins.item(0).text())
+        self.assertFalse(pins.item(0).icon().isNull())
+        app.pin_action("hide", pin_id)
+        self.assertIn(app.tr("Hidden individually", "已单独隐藏"), pins.item(0).text())
+
+        pins.setFocus()
+        QTest.keyClick(pins, Qt.Key.Key_Return)
+        self.assertTrue(app.pin_windows[pin_id].isVisible())
+        with patch("snaploom.app.QMessageBox.question", side_effect=[
+            QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes,
+        ]) as confirm:
+            QTest.keyClick(pins, Qt.Key.Key_Delete)
+            self.assertIn(pin_id, app.pin_windows)
+            QTest.keyClick(pins, Qt.Key.Key_Delete)
+            self.assertNotIn(pin_id, app.pin_windows)
+        self.assertEqual(confirm.call_count, 2)
 
     def test_dropping_a_local_image_on_the_dashboard_creates_a_pin(self):
         app = self.application
@@ -512,6 +589,9 @@ class UserJourneyTests(unittest.TestCase):
                     dialog.shortcuts["capture"].setText("Ctrl+Alt+S")
                     buttons = dialog.findChild(QDialogButtonBox)
                     self.click(buttons.button(QDialogButtonBox.StandardButton.Save))
+                    self.assertTrue(dialog.isVisible())
+                    self.assertEqual(app.workspace.history_count(), 1)
+                    self.click(buttons.button(QDialogButtonBox.StandardButton.Save))
                     self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
                 except Exception as error:
                     callback_errors.append(error)
@@ -524,11 +604,15 @@ class UserJourneyTests(unittest.TestCase):
             patch.object(Preferences, "exec", edit_preferences),
             patch.object(app.hotkeys, "configure", return_value=[]) as register,
             patch("snaploom.ui.QMessageBox.warning") as warning,
+            patch("snaploom.ui.QMessageBox.question", side_effect=[
+                QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes,
+            ]) as confirm,
         ):
             self.click(self.button(app.dashboard, "Settings", "设置"))
         if callback_errors:
             raise callback_errors[0]
         warning.assert_not_called()
+        self.assertEqual(confirm.call_count, 2)
         self.assertEqual(app.workspace.get("hotkeys")["capture"], "Ctrl+Alt+S")
         self.assertEqual(register.call_args.args[0]["capture"], "Ctrl+Alt+S")
         self.assertIn("Ctrl+Alt+S", app.dashboard.shortcuts.text())
@@ -542,6 +626,50 @@ class UserJourneyTests(unittest.TestCase):
         self.assertEqual(self.application.workspace.get("history_limit"), 0)
         self.assertEqual(self.application.workspace.get("hotkeys")["capture"], "Ctrl+Alt+S")
 
+    def test_settings_explain_conflicts_and_keep_the_previous_system_shortcut(self):
+        app = self.application
+        dialog = Preferences(app.workspace, app.tr, app.dashboard, apply_hotkeys=app.apply_hotkeys)
+        self.addCleanup(dialog.deleteLater)
+        dialog.show()
+        self.qt.processEvents()
+        save = dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save)
+        capture = dialog.shortcuts["capture"]
+        pen = dialog.editor_shortcuts["pen"]
+
+        def register(keys):
+            if keys["capture"] == "F8":
+                app.hotkeys.errors = {"capture": 1409}
+                return ["capture"]
+            app.hotkeys.errors = {}
+            return []
+
+        with (
+            patch.object(app.hotkeys, "configure", side_effect=register) as bindings,
+            patch("snaploom.ui.QMessageBox.warning") as warning,
+        ):
+            for key in ("not a key", "F3", "F5"):
+                capture.setText(key)
+                self.click(save)
+                self.assertTrue(dialog.isVisible())
+                self.assertIs(self.qt.focusWidget(), capture)
+            capture.setText("F1")
+            pen.setText("Esc")
+            self.click(save)
+            self.assertTrue(dialog.isVisible())
+            self.assertIs(self.qt.focusWidget(), pen)
+            bindings.assert_not_called()
+            self.click(self.button(dialog, "Restore default editor shortcuts", "恢复默认编辑器快捷键"))
+            self.assertEqual(pen.text(), "B")
+
+            capture.setText("F8")
+            self.click(save)
+            self.assertTrue(dialog.isVisible())
+            self.assertIs(self.qt.focusWidget(), capture)
+            self.assertEqual([call.args[0]["capture"] for call in bindings.call_args_list], ["F8", "F1"])
+            self.assertIn("F8", warning.call_args.args[-1])
+            self.assertEqual(app.workspace.get("hotkeys")["capture"], "F1")
+        dialog.reject()
+
     def test_barcode_menu_decodes_a_qr_image_and_copies_the_result(self):
         import zxingcpp
 
@@ -553,7 +681,8 @@ class UserJourneyTests(unittest.TestCase):
         self.screen.return_value = self.snapshot(qr)
         editor = self.open_capture("All displays", "所有屏幕")
         self.capture_menu_action(editor, "Scan barcode or QR code", "识别条形码或二维码")
-        self.until(lambda: bool(app.dialogs), "The QR recognition result did not open.", timeout=5000)
+        self.until(lambda: any(dialog.findChild(QTextEdit) for dialog in app.dialogs),
+                   "The QR recognition result did not open.", timeout=5000)
         result, = app.dialogs
         self.assertEqual(result.findChild(QTextEdit).toPlainText(), "Snaploom check")
         self.click(self.button(result, "Copy text", "复制文字"))

@@ -158,6 +158,9 @@ class Workspace:
             "SELECT id, created, region, action FROM history ORDER BY id DESC"
         ).fetchall()
 
+    def history_count(self):
+        return self.db.execute("SELECT COUNT(*) FROM history").fetchone()[0]
+
     def history_image(self, item_id):
         row = self.db.execute("SELECT image FROM history WHERE id = ?", (item_id,)).fetchone()
         return QImage.fromData(row[0]) if row else QImage()

@@ -1,16 +1,17 @@
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event
 from time import monotonic
 from unittest.mock import patch
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QToolButton
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox, QPushButton, QTextEdit, QToolButton
 
 from snaploom.app import Application
-from snaploom.capture import Snapshot
+from snaploom.capture import CaptureError, Snapshot
 from snaploom.commands import arguments
 
 
@@ -88,6 +89,12 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.assertIsNotNone(self.app.editor, "Screenshot editor did not open.")
         self.assertTrue(self.app.editor.isVisible())
 
+    def wait_until(self, predicate):
+        deadline = monotonic() + 3
+        while not predicate() and monotonic() < deadline:
+            QTest.qWait(10)
+        self.assertTrue(predicate())
+
     def click_capture_menu_item(self, editor, en, zh):
         more = next(button for button in editor.toolbar.findChildren(QToolButton) if button.menu())
         menu = more.menu()
@@ -153,6 +160,29 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.assertEqual(editor.selected_geometry(), desktop.rect())
         self.click_button("Copy", "复制", parent=editor.toolbar, widget=QToolButton)
         self.assertEqual(self.qt.clipboard().image().size(), desktop.size())
+
+    def test_current_window_without_an_eligible_foreground_allows_window_selection(self):
+        desktop = self.image(800, 520, "#386ef2")
+        candidate = QRect(50, 90, 200, 130)
+
+        def active_window():
+            self.assertFalse(self.app.dashboard.isVisible())
+            return None
+
+        with (
+            patch("snaploom.capture.capture_desktop", return_value=Snapshot(desktop, desktop.rect())),
+            patch("snaploom.capture.active_window", side_effect=active_window),
+            patch("snaploom.capture.detect_windows", return_value=[(candidate, "Editor")]),
+            patch("snaploom.capture.detect_elements", return_value=[]),
+        ):
+            self.click_button("Active window", "当前窗口")
+            self.wait_for_capture()
+            editor = self.app.editor
+            self.assertTrue(editor.selected_geometry().isEmpty())
+            QTest.mouseMove(editor, candidate.center())
+            QTest.mouseClick(editor, Qt.MouseButton.LeftButton, pos=candidate.center())
+
+        self.assertEqual(editor.selected_geometry(), candidate)
 
     def test_history_row_can_be_saved_copied_and_pinned(self):
         desktop = self.image(800, 520, "#386ef2")
@@ -238,7 +268,7 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.assertIsNone(self.app.editor)
         self.assertEqual(self.qt.clipboard().image().pixelColor(5, 5), QColor("#386ef2"))
 
-    def test_cli_hold_uses_requested_output_when_save_is_clicked(self):
+    def test_cli_hold_explicitly_confirms_requested_output(self):
         desktop = self.image(800, 520, "#386ef2")
         target = self.folder / "held capture.png"
         region = QRect(45, 54, 180, 140)
@@ -253,10 +283,189 @@ class DashboardEntryPointTests(unittest.TestCase):
             self.app.command(data, lambda **result: completed.append(result))
             self.wait_for_capture()
         editor = self.app.editor
+        labels = {button.text() for button in editor.toolbar.findChildren(QToolButton) if button.isVisible()}
+        self.assertNotIn(self.app.tr("Copy", "复制"), labels)
+        self.assertNotIn(self.app.tr("Save", "保存"), labels)
         with patch.object(self.app, "save_dialog") as save_dialog:
-            self.click_button("Save", "保存", parent=editor.toolbar, widget=QToolButton)
+            self.click_button("Confirm requested output", "确认输出", parent=editor.toolbar, widget=QToolButton)
         save_dialog.assert_not_called()
         self.assertEqual(completed[0]["code"], 0)
         self.assertIsNone(self.app.editor)
         self.assertEqual(QImage(str(target)).size(), region.size())
         self.assertEqual(len(self.app.workspace.history()), 1)
+
+    def test_size_dialog_rejects_a_second_capture_and_releases_on_cancel(self):
+        original_exec = QDialog.exec
+        observed = []
+
+        def while_open(dialog):
+            def cancel_after_hotkey():
+                self.app.hotkeys.triggered.emit("capture")
+                observed.append((self.app.capturing, self.app.dashboard.status.text()))
+                dialog.reject()
+
+            QTimer.singleShot(0, cancel_after_hotkey)
+            return original_exec(dialog)
+
+        with patch.object(QDialog, "exec", while_open):
+            self.click_button("Size and delay…", "尺寸与延时…")
+
+        self.assertEqual(observed, [(True, self.app.tr("Finish the current capture first.", "请先完成当前截图。"))])
+        self.assertIsNone(self.app.editor)
+        self.assertFalse(self.app.capturing)
+        self.assertTrue(self.app.dashboard.isVisible())
+        self.open_capture("All displays", "所有屏幕", self.image(800, 520, "#386ef2"))
+
+    def test_refresh_keeps_explicit_cursor_and_disabled_window_suggestions(self):
+        first = self.image(800, 520, "#386ef2")
+        second = self.image(800, 520, "#23a097")
+        self.app.workspace.set("detect_windows", False)
+        frames = [Snapshot(first, first.rect()), CaptureError("Desktop capture temporarily unavailable"),
+                  Snapshot(second, second.rect())]
+        with (
+            patch("snaploom.capture.capture_desktop", side_effect=frames) as capture,
+            patch("snaploom.capture.detect_windows") as windows,
+        ):
+            self.app.command(arguments(["snip", "--full", "--cursor"]))
+            self.wait_for_capture()
+            editor = self.app.editor
+            QTest.keyClick(editor, Qt.Key.Key_F5)
+            self.assertFalse(editor.isVisible())
+            self.wait_until(editor.isVisible)
+            self.assertEqual(editor.export_image().pixelColor(20, 20), QColor("#386ef2"))
+            self.assertEqual(self.app.dashboard.status.text(), "Desktop capture temporarily unavailable")
+            QTest.keyClick(editor, Qt.Key.Key_F5)
+            self.assertFalse(editor.isVisible())
+            self.wait_until(editor.isVisible)
+            windows.assert_not_called()
+
+        self.assertEqual([call.kwargs for call in capture.call_args_list], [{"include_cursor": True}] * 3)
+        self.assertEqual(editor.selected_geometry(), first.rect())
+        self.assertEqual(editor.export_image().pixelColor(20, 20), QColor("#23a097"))
+
+    def test_failed_automatic_save_keeps_copy_and_history_and_allows_manual_save(self):
+        blocked_folder = self.folder / "existing-file"
+        blocked_folder.touch()
+        self.app.workspace.set("save_folder", str(blocked_folder))
+        self.app.workspace.set("auto_save", True)
+        desktop = self.image(800, 520, "#386ef2")
+        editor = self.open_capture("All displays", "所有屏幕", desktop)
+        self.click_button("Copy", "复制", parent=editor.toolbar, widget=QToolButton)
+        self.assertIsNone(self.app.editor)
+        self.assertEqual(self.qt.clipboard().image().pixelColor(5, 5), QColor("#386ef2"))
+        self.assertEqual(len(self.app.workspace.history()), 1)
+        self.assertIn(self.app.tr("Automatic save failed.", "自动保存失败。"), self.app.dashboard.status.text())
+
+        editor = self.open_capture("All displays", "所有屏幕", desktop)
+        target = self.folder / "manual.png"
+        with patch.object(QFileDialog, "getSaveFileName", return_value=(str(target), "PNG (*.png)")) as choose:
+            self.click_button("Save", "保存", parent=editor.toolbar, widget=QToolButton)
+        self.assertEqual(Path(choose.call_args.args[2]).parent, self.folder)
+        self.assertEqual(QImage(str(target)).pixelColor(5, 5), QColor("#386ef2"))
+        self.assertIsNone(self.app.editor)
+
+    def test_scrolling_save_cancel_and_failure_keep_stitched_frames_and_pins_hidden(self):
+        import numpy as np
+
+        rgb = np.random.default_rng(17).integers(0, 255, (215, 160, 3), dtype=np.uint8)
+        document = QImage(rgb, 160, 215, 480, QImage.Format.Format_RGB888).copy()
+        first = document.copy(0, 0, 160, 160)
+        second = document.copy(0, 55, 160, 160)
+        pin_id = self.app.open_pin(self.image(100, 70, "#da5d35"), QPoint(80, 30))
+        pin = self.app.pin_windows[pin_id]
+        self.app.workspace.set("hide_pins_on_capture", True)
+        editor = self.open_capture("All displays", "所有屏幕", first)
+
+        def capture_frame(**_options):
+            self.assertFalse(pin.isVisible())
+            self.assertFalse(dialog.isVisible())
+            return Snapshot(second, second.rect())
+
+        with patch("snaploom.capture.capture_desktop", side_effect=capture_frame):
+            self.click_capture_menu_item(editor, "Scrolling capture", "滚动截图")
+            dialog, = self.app.dialogs
+            self.assertFalse(pin.isVisible())
+            self.assertTrue(self.app.capturing)
+            self.assertFalse(self.app.dashboard.isVisible())
+            self.click_button("Add next frame", "添加下一帧", parent=dialog)
+            self.wait_until(dialog.isVisible)
+
+        invalid_parent = self.folder / "blocked"
+        invalid_parent.touch()
+        target = self.folder / "stitched.png"
+        choices = [("", ""), (str(invalid_parent / "image.png"), "PNG (*.png)"),
+                   (str(target), "PNG (*.png)")]
+        with patch.object(QFileDialog, "getSaveFileName", side_effect=choices) as choose:
+            for _ in range(2):
+                self.click_button("Save…", "保存…", parent=dialog)
+                self.assertTrue(dialog.isVisible())
+                self.assertFalse(pin.isVisible())
+                self.assertEqual(self.app.workspace.history(), [])
+            self.click_button("Save…", "保存…", parent=dialog)
+
+        self.assertTrue(all(call.args[0] is dialog for call in choose.call_args_list))
+        stitched = QImage(str(target))
+        self.assertEqual(stitched.size(), document.size())
+        self.assertEqual(stitched.pixelColor(70, 195), document.pixelColor(70, 195))
+        self.assertFalse(self.app.capturing)
+        self.assertTrue(pin.isVisible())
+        self.assertTrue(self.app.dashboard.isVisible())
+
+    def test_recognition_busy_no_result_and_success_keep_selection_available(self):
+        desktop = self.image(800, 520, "#386ef2")
+        editor = self.open_capture("All displays", "所有屏幕", desktop)
+        self.app.recognition_jobs[0] = ("ocr", None, None)
+        with patch.object(QMessageBox, "information") as notice:
+            self.click_capture_menu_item(editor, "Extract text", "提取文字")
+            notice.assert_called_once()
+            self.assertIn(self.app.tr("already running", "正在识别"), notice.call_args.args[2])
+        self.app.recognition_jobs.clear()
+        self.assertTrue(editor.isVisible())
+
+        with (
+            patch("snaploom.app.recognize", side_effect=["", "<b>Literal text</b>"]),
+            patch.object(QMessageBox, "information") as notice,
+        ):
+            self.click_capture_menu_item(editor, "Extract text", "提取文字")
+            self.wait_until(lambda: notice.called)
+            self.assertIn(self.app.tr("No text", "未识别到文字"), notice.call_args.args[2])
+            self.assertTrue(editor.isVisible())
+            self.assertEqual(self.app.workspace.history(), [])
+            self.click_capture_menu_item(editor, "Extract text", "提取文字")
+            self.wait_until(lambda: any(dialog.findChild(QTextEdit) for dialog in self.app.dialogs))
+
+        result, = self.app.dialogs
+        self.assertEqual(result.findChild(QTextEdit).toPlainText(), "<b>Literal text</b>")
+        QTest.keyClick(result, Qt.Key.Key_Escape)
+        self.assertTrue(editor.isVisible())
+        self.assertEqual(editor.selected_geometry(), desktop.rect())
+        self.click_button("Copy", "复制", parent=editor.toolbar, widget=QToolButton)
+        self.assertEqual(self.qt.clipboard().image().pixelColor(5, 5), QColor("#386ef2"))
+        self.assertEqual(len(self.app.workspace.history()), 1)
+
+    def test_cancelling_recognition_does_not_open_a_late_result(self):
+        desktop = self.image(800, 520, "#386ef2")
+        editor = self.open_capture("All displays", "所有屏幕", desktop)
+        pending = Event()
+        release = Event()
+
+        def recognize(_image, _action):
+            pending.set()
+            release.wait(3)
+            return "A late result"
+
+        with patch("snaploom.app.recognize", side_effect=recognize):
+            try:
+                self.click_capture_menu_item(editor, "Extract text", "提取文字")
+                self.wait_until(pending.is_set)
+                progress, = self.app.dialogs
+                QTest.keyClick(progress, Qt.Key.Key_Escape)
+                self.assertFalse(self.app.dialogs)
+                self.assertTrue(editor.isVisible())
+            finally:
+                release.set()
+            self.wait_until(lambda: not self.app.recognition_jobs)
+
+        self.assertFalse(self.app.dialogs)
+        self.assertTrue(editor.isVisible())
+        self.assertEqual(self.app.workspace.history(), [])

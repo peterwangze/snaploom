@@ -45,6 +45,17 @@ def parse(shortcut):
     return modifiers, key, code
 
 
+def editor_key_for_hotkey(modifiers, key):
+    """Express a physical system shortcut in Qt's portable shortcut notation."""
+    mac = sys.platform == "darwin"
+    names = {"ctrl": "Meta" if mac else "Ctrl", "super": "Ctrl" if mac else "Meta",
+             "alt": "Alt", "shift": "Shift"}
+    special = {"enter": "Return", "delete": "Del", "insert": "Ins",
+               "page_up": "PgUp", "page_down": "PgDown", "print_screen": "Print"}
+    return "+".join([*(names[modifier] for modifier in ("ctrl", "super", "alt", "shift") if modifier in modifiers),
+                     special.get(key, key.upper() if len(key) == 1 or key.startswith("f") else key.title())])
+
+
 class WindowsKeys(QAbstractNativeEventFilter):
     def __init__(self, emit):
         super().__init__()

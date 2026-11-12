@@ -284,6 +284,14 @@ def active_window() -> QRect | None:
             xlib.XGetInputFocus(display, C.byref(window), C.byref(revert))
         if window.value in (0, 1, root):
             return None
+        if _property(xlib, display, window, b"_NET_WM_PID") == [os.getpid()]:
+            return None
+        kinds = _property(xlib, display, window, b"_NET_WM_WINDOW_TYPE")
+        if isinstance(kinds, list) and any(
+            xlib.XInternAtom(display, kind, True) in kinds
+            for kind in (b"_NET_WM_WINDOW_TYPE_DESKTOP", b"_NET_WM_WINDOW_TYPE_DOCK")
+        ):
+            return None
         mapping = _monitor_mapping(xlib, display, root, QGuiApplication.screens())
         rect = _qt_window_rect(_window_geometry(xlib, display, root, window), mapping)
         return rect if not rect.isEmpty() else None

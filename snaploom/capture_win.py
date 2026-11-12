@@ -251,20 +251,24 @@ def _window_rect(window, *, frame: bool = True) -> QRect:
     return _qt_rect(rect) if _get_rect(window, C.byref(rect)) else QRect()
 
 
+def _capture_window_is_visible(window, own_pid: int) -> bool:
+    if not _is_visible(window) or _is_minimized(window):
+        return False
+    pid = W.DWORD()
+    _get_pid(window, C.byref(pid))
+    if pid.value == own_pid or _window_class(window) in {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}:
+        return False
+    cloaked = W.DWORD()
+    return _dwm_attr(window, 14, C.byref(cloaked), C.sizeof(cloaked)) != 0 or not cloaked.value
+
+
 def _visible_windows(point: W.POINT | None = None) -> list[tuple[W.HWND, QRect]]:
     result: list[tuple[W.HWND, QRect]] = []
     own_pid = os.getpid()
 
     @_window_callback
     def add(window, _context):
-        if not _is_visible(window) or _is_minimized(window):
-            return True
-        pid = W.DWORD()
-        _get_pid(window, C.byref(pid))
-        if pid.value == own_pid or _window_class(window) in {"Progman", "WorkerW"}:
-            return True
-        cloaked = W.DWORD()
-        if _dwm_attr(window, 14, C.byref(cloaked), C.sizeof(cloaked)) == 0 and cloaked.value:
+        if not _capture_window_is_visible(window, own_pid):
             return True
         rect = _window_rect(window)
         if rect.isEmpty():
@@ -293,7 +297,7 @@ def detect_windows() -> list[tuple[QRect, str]]:
 
 def active_window() -> QRect | None:
     window = _get_active()
-    if not window:
+    if not window or not _capture_window_is_visible(window, os.getpid()):
         return None
     rect = _desktop_rect(_window_rect(window), _monitor_mapping(QGuiApplication.screens()))
     return rect if not rect.isEmpty() else None

@@ -219,11 +219,15 @@ class PinWindow(QWidget):
         self.update()
         self.timer.start()
 
-    def replace(self, image):
+    def replace(self, image, *, preserve_appearance=False):
         self.image = image.copy()
-        for key in ("rotation", "horizontal", "vertical", "gray", "invert", "thumbnail"):
-            self.state[key] = 0 if key == "rotation" else False
-        self.apply_state()
+        if not preserve_appearance:
+            self.state.update({"rotation": 0, "horizontal": False, "vertical": False,
+                               "gray": False, "invert": False, "thumbnail": False})
+            self.state.pop("thumbnail_crop", None)
+            self.thumbnail_crop = QRect()
+        current = self.movie.currentImage() if self.movie is not None else QImage()
+        self.apply_state(current if preserve_appearance and not current.isNull() else None)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -276,8 +280,9 @@ class PinWindow(QWidget):
                 self.resize_origin = self.state["zoom"]
         elif event.button() == Qt.MouseButton.MiddleButton:
             self.reset()
-        elif event.button() == Qt.MouseButton.RightButton and not self.state["thumbnail"]:
-            self.drag_select = event.position().toPoint()
+        elif event.button() == Qt.MouseButton.RightButton:
+            if not self.state["thumbnail"]:
+                self.drag_select = event.position().toPoint()
 
     def mouseMoveEvent(self, event):
         if self.drag_position is not None and not event.buttons() & Qt.MouseButton.LeftButton:
@@ -298,7 +303,7 @@ class PinWindow(QWidget):
                 self.zoom(self.resize_origin + delta.x() / native_width)
         elif self.drag_select is not None:
             point = event.position().toPoint()
-            if (point - self.drag_select).manhattanLength() > 8:
+            if self.right_drag or (point - self.drag_select).manhattanLength() > 8:
                 self.right_drag = True
                 self.selection_rect = QRect(self.drag_select, point).normalized().intersected(self.rect())
                 self.update()
@@ -309,19 +314,22 @@ class PinWindow(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_position = None
             self.resize_origin = None
-        elif event.button() == Qt.MouseButton.RightButton and self.drag_select is not None:
-            if self.right_drag and not self.selection_rect.isEmpty():
-                self.thumbnail_crop = QRect(self.image_point(self.selection_rect.topLeft()),
-                                             self.image_point(self.selection_rect.bottomRight())).normalized()
-                self.state["thumbnail_crop"] = self.thumbnail_crop.getRect()
-                self.set_state("thumbnail", True)
+        elif event.button() == Qt.MouseButton.RightButton:
+            if self.right_drag:
+                end = event.position().toPoint()
+                if (end - self.drag_select).manhattanLength() > 8:
+                    selected = QRect(self.drag_select, end).normalized().intersected(self.rect())
+                    if not selected.isEmpty():
+                        self.thumbnail_crop = QRect(self.image_point(selected.topLeft()),
+                                                     self.image_point(selected.bottomRight())).normalized()
+                        self.state["thumbnail_crop"] = self.thumbnail_crop.getRect()
+                        self.set_state("thumbnail", True)
+            else:
+                self.show_menu(event.globalPosition().toPoint())
             self.drag_select = None
             self.selection_rect = QRect()
-            QTimer.singleShot(100, self, self.finish_right_drag)
-
-    def finish_right_drag(self):
-        self.right_drag = False
-        self.update()
+            self.right_drag = False
+            self.update()
 
     def snapped_position(self, position):
         moving = QRect(position, self.size())
@@ -362,8 +370,12 @@ class PinWindow(QWidget):
             self.dismissed.emit(False)
 
     def wheelEvent(self, event):
-        step = 1 if event.angleDelta().y() > 0 else -1
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        delta = event.angleDelta().y() or event.pixelDelta().y()
+        if not delta:
+            event.ignore()
+            return
+        step = 1 if delta > 0 else -1
+        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
             self.set_state("opacity", min(100, max(10, self.state["opacity"] + step * 5)))
         elif event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
             self.set_state("rotation", (self.state["rotation"] + step * 90) % 360)
@@ -383,7 +395,7 @@ class PinWindow(QWidget):
         key = event.key()
         modifiers = event.modifiers()
         if key == Qt.Key.Key_Escape:
-            self.dismissed.emit(bool(modifiers & Qt.KeyboardModifier.ShiftModifier))
+            self.dismissed.emit(False)
         elif key == Qt.Key.Key_Alt:
             self.track_pick = True
             self.update()
@@ -394,7 +406,7 @@ class PinWindow(QWidget):
                 QApplication.clipboard().setText(image.pixelColor(point).name().upper())
         elif key in {Qt.Key.Key_Plus, Qt.Key.Key_Equal, Qt.Key.Key_Minus}:
             step = -1 if key == Qt.Key.Key_Minus else 1
-            if modifiers & Qt.KeyboardModifier.ControlModifier:
+            if modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
                 self.set_state("opacity", min(100, max(10, self.state["opacity"] + step * 5)))
             else:
                 self.zoom(self.state["zoom"] * 1.12 ** step)
@@ -429,7 +441,13 @@ class PinWindow(QWidget):
         self.dismissed.emit(False)
 
     def contextMenuEvent(self, event):
-        if self.right_drag or self.state["click_through"]:
+        # Mouse clicks are handled on release on every platform so a right-drag can select a thumbnail.
+        if event.reason() != event.Reason.Mouse:
+            self.show_menu(event.globalPos())
+        event.accept()
+
+    def show_menu(self, position):
+        if self.state["click_through"]:
             return
         if self.menu is not None:
             self.menu.hide()
@@ -437,7 +455,7 @@ class PinWindow(QWidget):
         self.menu = menu
         self.populate_menu(menu)
         menu.aboutToHide.connect(self.dispose_menu)
-        menu.popup(event.globalPos())
+        menu.popup(position)
 
     def dispose_menu(self):
         menu = self.menu
@@ -445,9 +463,13 @@ class PinWindow(QWidget):
         menu.deleteLater()
 
     def populate_menu(self, menu):
+        thumbnail = self.state["thumbnail"]
+        copy_label = ("Copy full image", "复制完整图像") if thumbnail else ("Copy image", "复制图像")
+        save_label = ("Save full image as…", "另存完整图像…") if thumbnail else ("Save as…", "另存为…")
+        crop_label = ("Crop current frame…", "裁剪当前帧…") if self.movie else ("Crop…", "裁剪…")
         entries = (
-            ("copy", "Copy image", "复制图像"), ("save", "Save as…", "另存为…"),
-            ("annotate", "Annotate…", "标注…"), ("crop", "Crop…", "裁剪…"), ("print", "Print…", "打印…"),
+            ("copy", *copy_label), ("save", *save_label),
+            ("annotate", "Annotate source image…", "标注原图…"), ("crop", *crop_label), ("print", "Print…", "打印…"),
             ("ocr", "Extract text…", "识别文字…"), ("barcode", "Read QR or barcode…", "识别二维码或条码…"),
             ("group", "Move to group…", "移至分组…"),
             ("replace", "Replace from clipboard", "用剪贴板内容替换"),

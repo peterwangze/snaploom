@@ -47,6 +47,7 @@ DEFAULT_EDITOR_SHORTCUTS = {tool: key for tool, _, _, key in TOOLS} | {
 }
 REGION_TOOLS = {"rectangle", "ellipse", "mosaic", "blur", "redact", "erase", "magnify"}
 EFFECT_TOOLS = {"mosaic", "blur", "erase", "magnify"}
+ROTATABLE_TOOLS = REGION_TOOLS - EFFECT_TOOLS | {"text", "number"}
 DEFAULT_COLOR = "#ff5b55"
 ACCENT = QColor("#68bfff")
 
@@ -474,18 +475,25 @@ class CaptureEditor(QWidget):
         self.options = options
         self._chinese = str(_read_option(options, "locale", "en")).lower().startswith("zh")
         self.color_only = bool(_read_option(options, "color_only", False))
+        self.default_action = _read_option(options, "default_action", "copy")
         self.setWindowTitle(self._label("Pick a color", "屏幕取色") if self.color_only else self._label(
             "Capture and annotate", "截图与标注",
         ))
         self.setAccessibleName(self.windowTitle())
-        self.setAccessibleDescription(
-            self._label("Click or press Enter to copy the color at the pointer. Escape cancels.",
-                        "单击或按回车复制指针位置的颜色。按 Esc 取消。")
-            if self.color_only else self._label(
-                "Drag to select an area. Hold Alt to magnify. Press Space to start and finish a keyboard selection. Enter copies the capture.",
-                "拖动选择区域，按住 Alt 查看放大镜。可按空格开始和结束键盘框选。按回车复制截图。",
-            )
-        )
+        if self.color_only:
+            description = self._label("Click or press Enter to copy the color at the pointer. Escape cancels.",
+                                      "单击或按回车复制指针位置的颜色。按 Esc 取消。")
+        elif self._embedded:
+            description = self._label("Choose a tool to annotate the image. Use the confirmation button to apply the result.",
+                                      "选择工具标注图像。使用窗口底部的确认按钮提交当前结果。")
+        else:
+            description = self._label("Drag to select an area, or press Space to start and finish keyboard selection. ",
+                                      "拖动选择区域，或按空格开始和结束键盘框选。")
+            if self.default_action == "copy":
+                description += self._label("Press Enter to copy the selected area.", "按回车复制选区。")
+            else:
+                description += self._label("Press Enter to run the requested output.", "按回车执行指定输出。")
+        self.setAccessibleDescription(description)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
@@ -494,8 +502,9 @@ class CaptureEditor(QWidget):
         self._window_bounds = [(QRect(rect), str(title)) for rect, title in windows]
         self.windows = self._window_bounds
         self.history = [QRect(rect) for rect in history]
-        self.history_index = len(self.history)
+        self.history_index = -1
         self.selection = QRect()
+        self._annotation_origin = QPoint()
         self._keyboard_anchor = None
         self.hover_index = -1
         self.position = QPoint(-1, -1)
@@ -548,6 +557,11 @@ class CaptureEditor(QWidget):
             action: QKeySequence.fromString(str(custom_shortcuts.get(action, default)), QKeySequence.SequenceFormat.PortableText)
             for action, default in DEFAULT_EDITOR_SHORTCUTS.items()
         }
+        alternate_redo = QKeySequence("Ctrl+Y")
+        self._alternate_redo = (
+            alternate_redo if self._shortcut_sequences["redo"] == QKeySequence(DEFAULT_EDITOR_SHORTCUTS["redo"])
+            and alternate_redo not in self._shortcut_sequences.values() else QKeySequence()
+        )
         if self._embedded:
             self.setFixedSize(snapshot.geometry.size())
         else:
@@ -556,6 +570,7 @@ class CaptureEditor(QWidget):
         self._bind_shortcuts()
         if selection is not None and not self.color_only:
             self.selection = self._local_rect(selection)
+            self._annotation_origin = self.selection.topLeft()
         self._place_toolbar()
 
     def _label(self, english, chinese):
@@ -571,14 +586,16 @@ class CaptureEditor(QWidget):
         }
         actions.update(undo=self._undo, redo=self._redo)
         if not self._embedded:
-            actions |= {
-                action: lambda name=action: self._complete(name)
-                for action in ("copy", "save", "pin", "quick-save", "copy-file")
-            }
-            actions["refresh"] = self.refresh_requested.emit
+            if self.default_action != "output":
+                actions |= {
+                    action: lambda name=action: self._complete(name)
+                    for action in ("copy", "save", "pin", "quick-save", "copy-file")
+                }
             actions["color"] = self._copy_color
         if self.color_only:
-            actions = {"color": self._copy_color, "refresh": self.refresh_requested.emit}
+            actions = {"color": self._copy_color}
+        if not self._embedded and _read_option(self.options, "allow_refresh", True):
+            actions["refresh"] = self.refresh_requested.emit
         keys = set()
         self._floating_shortcuts = []
         for action in actions:
@@ -717,13 +734,20 @@ class CaptureEditor(QWidget):
             actions.setSpacing(3)
             layout.addLayout(actions)
             actions.addStretch()
-            copy_button = self._button(
-                actions, self._label("Copy", "复制"), lambda: self._complete("copy"),
-                shortcut=" / ".join(filter(None, (self._shortcut_label("copy"), "Enter"))),
-            )
-            copy_button.setObjectName("copyCapture")
-            self._button(actions, self._label("Pin", "贴图"), lambda: self._complete("pin"), shortcut=self._shortcut_label("pin"))
-            self._button(actions, self._label("Save", "保存"), lambda: self._complete("save"), shortcut=self._shortcut_label("save"))
+            if self.default_action == "output":
+                title = _read_option(self.options, "requested_output_label") or self._label("Confirm requested output", "确认输出")
+                primary = self._button(actions, title, lambda: self._complete("output"), shortcut="Enter")
+                outputs = _read_option(self.options, "requested_outputs", ())
+                if outputs:
+                    primary.setToolTip("\n".join((primary.toolTip(), *outputs)))
+            else:
+                primary = self._button(
+                    actions, self._label("Copy", "复制"), lambda: self._complete("copy"),
+                    shortcut=" / ".join(filter(None, (self._shortcut_label("copy"), "Enter"))),
+                )
+                self._button(actions, self._label("Pin", "贴图"), lambda: self._complete("pin"), shortcut=self._shortcut_label("pin"))
+                self._button(actions, self._label("Save", "保存"), lambda: self._complete("save"), shortcut=self._shortcut_label("save"))
+            primary.setObjectName("copyCapture")
             more = self._button(actions, self._label("More", "更多"), lambda: None)
             more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
             more.setMenu(self._output_menu(more))
@@ -733,25 +757,28 @@ class CaptureEditor(QWidget):
 
     def _output_menu(self, parent):
         menu = QMenu(parent)
-        for key, english, chinese in (
-            ("quick-save", "Quick save", "快速保存"),
-            ("copy-file", "Copy image as file", "复制为文件"),
-            ("ocr", "Extract text", "提取文字"),
-            ("barcode", "Scan barcode or QR code", "识别条形码或二维码"),
-            ("print", "Print", "打印"),
-        ):
-            menu.addAction(self._label(english, chinese), lambda checked=False, action=key: self._complete(action))
-        if _read_option(self.options, "allow_scroll", True):
-            menu.addAction(self._label("Scrolling capture", "滚动截图"), lambda: self._complete("scroll"))
-        if _read_option(self.options, "allow_share", False):
-            menu.addAction(self._label("Share", "系统共享"), lambda: self._complete("share"))
-        menu.addAction(self._label("Refresh screenshot", "刷新截图"), self.refresh_requested.emit)
+        if self.default_action != "output":
+            for key, english, chinese in (
+                ("quick-save", "Quick save", "快速保存"),
+                ("copy-file", "Copy image as file", "复制为文件"),
+                ("ocr", "Extract text", "提取文字"),
+                ("barcode", "Scan barcode or QR code", "识别条形码或二维码"),
+                ("print", "Print", "打印"),
+            ):
+                menu.addAction(self._label(english, chinese), lambda checked=False, action=key: self._complete(action))
+            if _read_option(self.options, "allow_scroll", True):
+                menu.addAction(self._label("Scrolling capture", "滚动截图"), lambda: self._complete("scroll"))
+            if _read_option(self.options, "allow_share", False):
+                menu.addAction(self._label("Share", "系统共享"), lambda: self._complete("share"))
+            menu.addSeparator()
+        if _read_option(self.options, "allow_refresh", True):
+            menu.addAction(self._label("Refresh screenshot", "刷新截图"), self.refresh_requested.emit)
         menu.addAction(self._label("Copy pixel color", "复制像素颜色"), self._copy_color)
         menu.addAction(self._label("Lock selection ratio", "锁定选区比例"), self._choose_ratio)
-        menu.addAction(self._label("Set exact dimensions", "设置精确尺寸"), self._choose_size)
+        menu.addAction(self._label("Set selection size", "设置选区尺寸"), self._choose_size)
         menu.addAction(self._label("Rounded output corners", "导出圆角"), self._choose_radius)
         custom = _read_option(self.options, "custom_outputs", {})
-        if custom:
+        if custom and self.default_action != "output":
             menu.addSeparator()
             entries = custom.items() if isinstance(custom, Mapping) else ((label, label) for label in custom)
             for identifier, label in entries:
@@ -766,6 +793,8 @@ class CaptureEditor(QWidget):
 
     def _set_selection(self, rect, *, defer_repaint=False):
         self.selection = QRect(rect).normalized().intersected(self.rect())
+        if not (self.document.annotations or self.document.undo_history or self.document.redo_history or self.line_points):
+            self._annotation_origin = self.selection.topLeft()
         if not defer_repaint:
             self._place_toolbar()
             self.update()
@@ -833,6 +862,7 @@ class CaptureEditor(QWidget):
 
     def set_snapshot(self, snapshot, windows=None):
         geometry = self.selected_geometry()
+        self._annotation_origin += self.snapshot.geometry.topLeft() - snapshot.geometry.topLeft()
         self.snapshot = snapshot
         if windows is not None:
             self._window_bounds = [(QRect(rect), str(title)) for rect, title in windows]
@@ -855,14 +885,20 @@ class CaptureEditor(QWidget):
         if self.crop_mode:
             return render_annotations(self.snapshot.image, self.document.annotations).copy(self.selection)
         return render_annotations(
-            self._selection_base(), self.document.annotations,
+            self._selection_base(), self._selection_annotations(self.document.annotations),
             getattr(self, "_corner_radius", _read_option(self.options, "corner_radius", 0)),
             self.selection.size(),
         )
 
+    def _selection_annotations(self, annotations):
+        offset = self._annotation_origin - self.selection.topLeft()
+        return tuple(item.moved(offset) for item in annotations) if not offset.isNull() else annotations
+
     def _complete(self, action, *, custom=False):
         if self.finished:
             return
+        if self._keyboard_anchor is not None:
+            self._end_keyboard_selection()
         if self.selection.isEmpty():
             hovered = self._hover_rect()
             if not hovered.isEmpty():
@@ -876,7 +912,7 @@ class CaptureEditor(QWidget):
         if image.isNull():
             return
         geometry = self.selected_geometry()
-        if action in {"save", "quick-save", "copy-file", "print"} and not custom:
+        if action in {"save", "quick-save", "copy-file", "print", "ocr", "barcode"} and not custom:
             self.completed.emit(action, image, geometry)
             return
         self.finished = True
@@ -961,8 +997,8 @@ class CaptureEditor(QWidget):
         self.style.setCurrentIndex(max(0, self.style.findData(chosen)))
         self.style.setVisible(len(styles) > 1)
         self.fill.setVisible(tool in {"rectangle", "ellipse"})
-        self.number_group.setVisible(tool == "number")
-        self.number_spin.setVisible(tool == "number")
+        self.number_group.setVisible(self.tool == "number")
+        self.number_spin.setVisible(self.tool == "number")
         self.color_button.setVisible(tool not in {"select", "mosaic", "blur", "erase"})
         width = selected.width if selected is not None else settings.get("width", self.annotation_width)
         self.stroke_width.setValue(width if isinstance(width, int) else self.annotation_width)
@@ -995,7 +1031,7 @@ class CaptureEditor(QWidget):
         self.stroke_width.setVisible(uses_width)
 
     def _set_tool(self, tool):
-        if self.line_points:
+        if self.line_points and tool != "line":
             self._finish_line()
         elif tool != "line":
             self._line_redo.clear()
@@ -1014,11 +1050,16 @@ class CaptureEditor(QWidget):
         self.color_button.setIcon(QIcon(pixmap))
 
     def _choose_color(self):
+        selected = self._selected_annotation()
+        tool = selected.tool if selected is not None else self.tool
+        options = QColorDialog.ColorDialogOption(0) if tool == "redact" else QColorDialog.ColorDialogOption.ShowAlphaChannel
         color = QColorDialog.getColor(
             QColor(self.color), self, self._label("Annotation color", "标注颜色"),
-            QColorDialog.ColorDialogOption.ShowAlphaChannel,
+            options,
         )
         if color.isValid():
+            if tool == "redact":
+                color.setAlpha(255)
             self.color = color.name(QColor.NameFormat.HexArgb)
             self._update_color_button()
             self._style_changed()
@@ -1104,15 +1145,15 @@ class CaptureEditor(QWidget):
         screen = QApplication.screenAt(self.selection.center() + self.snapshot.geometry.topLeft())
         scale = screen.devicePixelRatio() if screen else self.snapshot.image.devicePixelRatio()
         width, confirmed = QInputDialog.getInt(
-            self, self._label("Exact selection size", "精确选区尺寸"),
-            self._label("Width in pixels", "像素宽度"),
+            self, self._label("Selection size", "选区尺寸"),
+            self._label("Output width (px, rounded for display scaling)", "输出宽度（像素，按显示缩放取整）"),
             max(1, round(self.selection.width() * scale)), 1, max(1, round(self.width() * scale)),
         )
         if not confirmed:
             return
         height, confirmed = QInputDialog.getInt(
-            self, self._label("Exact selection size", "精确选区尺寸"),
-            self._label("Height in pixels", "像素高度"),
+            self, self._label("Selection size", "选区尺寸"),
+            self._label("Output height (px, rounded for display scaling)", "输出高度（像素，按显示缩放取整）"),
             max(1, round(self.selection.height() * scale)), 1, max(1, round(self.height() * scale)),
         )
         if confirmed:
@@ -1153,7 +1194,9 @@ class CaptureEditor(QWidget):
             self._line_redo.append(self.line_points.pop())
             self._update_history_buttons()
         else:
+            before = self.document.annotations
             self.document.undo()
+            self._update_next_number_after_history(before)
             self.selected_items.clear()
             self._render_key = None
             self._update_controls()
@@ -1165,12 +1208,31 @@ class CaptureEditor(QWidget):
             self.line_points.append(self._line_redo.pop())
             self._update_history_buttons()
         else:
+            before = self.document.annotations
             self.document.redo()
+            self._update_next_number_after_history(before)
             self.selected_items.clear()
             self._render_key = None
             self._update_controls()
         self._focus_canvas()
         self.update()
+
+    def _update_next_number_after_history(self, before):
+        after = self.document.annotations
+        undone = len(before) > len(after)
+        shorter, longer = (after, before) if undone else (before, after)
+        if len(longer) != len(shorter) + 1 or shorter != longer[:-1]:
+            return
+        item = longer[-1]
+        if item.tool != "number" or not item.text.isdecimal():
+            return
+        number = int(item.text)
+        following = min(9999, number + 1)
+        old, new = (following, number) if undone else (number, following)
+        if self._next_numbers.get(item.series, 1) == old:
+            self._next_numbers[item.series] = new
+            if item.series == self._number_series:
+                self.number_spin.setValue(new)
 
     def _make_annotation(self, points, *, text=""):
         return Annotation(
@@ -1207,10 +1269,9 @@ class CaptureEditor(QWidget):
         )
 
     def _rotate_selected(self, delta):
-        rotatable = REGION_TOOLS - EFFECT_TOOLS | {"text", "number"}
         self._commit(
             replace(item, angle=(item.angle + delta) % 360)
-            if index in self.selected_items and item.tool in rotatable else item
+            if index in self.selected_items and item.tool in ROTATABLE_TOOLS else item
             for index, item in enumerate(self.document.annotations)
         )
 
@@ -1261,8 +1322,9 @@ class CaptureEditor(QWidget):
                     lambda checked=False, value=series: self._move_number_to_series(item, value),
                 )
         if self.selected_items:
-            menu.addAction(self._label("Rotate selected left", "向左旋转所选"), lambda: self._rotate_selected(-15))
-            menu.addAction(self._label("Rotate selected right", "向右旋转所选"), lambda: self._rotate_selected(15))
+            if any(self.document.annotations[index].tool in ROTATABLE_TOOLS for index in self.selected_items):
+                menu.addAction(self._label("Rotate selected left", "向左旋转所选"), lambda: self._rotate_selected(-15))
+                menu.addAction(self._label("Rotate selected right", "向右旋转所选"), lambda: self._rotate_selected(15))
             menu.addAction(self._label("Delete selected annotations", "删除所选标注"), self._remove_selected)
         if self.document.annotations:
             menu.addAction(self._label("Clear all annotations", "清空全部标注"), self._clear_annotations)
@@ -1370,9 +1432,12 @@ class CaptureEditor(QWidget):
         dx = end.x() - start.x()
         dy = end.y() - start.y()
         if self.aspect > 0:
-            width = max(abs(dx), abs(dy) * self.aspect)
-            height = width / self.aspect
-            end = QPoint(start.x() + round(width) * (-1 if dx < 0 else 1), start.y() + round(height) * (-1 if dy < 0 else 1))
+            max_width = start.x() + 1 if dx < 0 else self.width() - start.x()
+            max_height = start.y() + 1 if dy < 0 else self.height() - start.y()
+            width = min(max(abs(dx) + 1, (abs(dy) + 1) * self.aspect), max_width, max_height * self.aspect)
+            height = max(1, round(width / self.aspect))
+            width = max(1, round(width))
+            end = start + QPoint((width - 1) * (-1 if dx < 0 else 1), (height - 1) * (-1 if dy < 0 else 1))
         top_left = QPoint(min(start.x(), end.x()), min(start.y(), end.y()))
         bottom_right = QPoint(max(start.x(), end.x()), max(start.y(), end.y()))
         return QRect(top_left, bottom_right).intersected(self.rect())
@@ -1410,14 +1475,11 @@ class CaptureEditor(QWidget):
         elif "bottom" in self.resize_edges:
             rect.setBottom(max(position.y(), rect.top() + 1))
         if self.aspect:
-            if len(self.resize_edges) == 1 and self.resize_edges[0] in {"top", "bottom"}:
-                rect.setWidth(max(1, round(rect.height() * self.aspect)))
-            else:
-                height = max(1, round(rect.width() / self.aspect))
-                if "top" in self.resize_edges:
-                    rect.setTop(rect.bottom() - height + 1)
-                else:
-                    rect.setHeight(height)
+            left, top = "left" in self.resize_edges, "top" in self.resize_edges
+            anchor = QPoint(rect.right() if left else rect.left(), rect.bottom() if top else rect.top())
+            x = (rect.left() if left else rect.right()) if left or "right" in self.resize_edges else anchor.x()
+            y = (rect.top() if top else rect.bottom()) if top or "bottom" in self.resize_edges else anchor.y()
+            return self._rect_from_points(anchor, QPoint(x, y))
         return rect.intersected(self.rect())
 
     def _annotation_point(self, position):
@@ -1425,7 +1487,7 @@ class CaptureEditor(QWidget):
         return QPointF(
             max(0, min(relative.x(), self.selection.width() - 1)),
             max(0, min(relative.y(), self.selection.height() - 1)),
-        )
+        ) + self.selection.topLeft() - self._annotation_origin
 
     def _stroke_endpoint(self, point, mods):
         if not (mods & Qt.KeyboardModifier.ShiftModifier) or not self.points:
@@ -1442,12 +1504,13 @@ class CaptureEditor(QWidget):
         else:
             return point
         scale = 1.0
-        for coord, change, bound in (
-            (start.x(), delta.x(), self.selection.width() - 1),
-            (start.y(), delta.y(), self.selection.height() - 1),
+        bounds = self.selection.translated(-self._annotation_origin)
+        for coord, change, lower, upper in (
+            (start.x(), delta.x(), bounds.left(), bounds.right()),
+            (start.y(), delta.y(), bounds.top(), bounds.bottom()),
         ):
-            if change and not 0 <= coord + change <= bound:
-                scale = min(scale, ((bound if change > 0 else 0) - coord) / change)
+            if change and not lower <= coord + change <= upper:
+                scale = min(scale, ((upper if change > 0 else lower) - coord) / change)
         return start + delta * scale
 
     def _current_stroke(self):
@@ -1458,20 +1521,31 @@ class CaptureEditor(QWidget):
         return self._make_annotation(self.points)
 
     def mousePressEvent(self, event):
+        if self._keyboard_anchor is not None and event.button() in {Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton}:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.position = event.position().toPoint()
+                self._set_selection(self._rect_from_points(self._keyboard_anchor, self.position), defer_repaint=True)
+            self._end_keyboard_selection(cancel=event.button() == Qt.MouseButton.RightButton)
+            return
         if event.button() == Qt.MouseButton.RightButton:
             if self.line_points:
                 self._finish_line()
             elif self.selection.isEmpty() and not self._embedded:
                 self.close()
-            else:
+            elif not self.crop_mode:
                 position = event.position().toPoint()
                 index = self._point_in_annotation(self._annotation_point(position)) if self.selection.contains(position) else None
                 if index is not None and index not in self.selected_items:
                     self.selected_items = {index}
                     self._set_tool("select")
+                elif index is None and self.selected_items:
+                    self.selected_items.clear()
+                    self._update_controls()
+                    self.update()
                 menu = self._edit_menu(self._selected_annotation())
                 if menu.actions():
                     menu.exec(event.globalPosition().toPoint())
+                menu.deleteLater()
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
@@ -1660,7 +1734,7 @@ class CaptureEditor(QWidget):
                 self._update_controls()
                 self._edit_text(point, item)
             elif not self._embedded and self.selection.contains(event.position().toPoint()):
-                self._complete(_read_option(self.options, "default_action", "copy"))
+                self._complete(self.default_action)
 
     def wheelEvent(self, event):
         if self.selection.isEmpty() and self.windows and self.auto_detect and not self.color_only:
@@ -1693,7 +1767,18 @@ class CaptureEditor(QWidget):
                 return
             return super().keyPressEvent(event)
         if key == key_code.Key_Escape:
-            if self.line_points or self._line_redo:
+            if self._keyboard_anchor is not None:
+                self._end_keyboard_selection(cancel=True)
+            elif self.drag_mode:
+                mode, self.drag_mode = self.drag_mode, ""
+                self.working_annotations = None
+                self.points = []
+                if mode in {"region", "resize", "move"}:
+                    self._set_selection(self.original_selection, defer_repaint=True)
+                    self._update_hover()
+                self._place_toolbar()
+                self.update()
+            elif self.line_points or self._line_redo:
                 self.line_points.clear()
                 self._line_redo.clear()
                 self._update_history_buttons()
@@ -1710,9 +1795,7 @@ class CaptureEditor(QWidget):
         if not self.color_only and pressed == self._shortcut_sequences["undo"]:
             self._undo()
             return
-        if not self.color_only and (pressed == self._shortcut_sequences["redo"] or (
-            control and key == key_code.Key_Y and not self._shortcut_sequences["redo"].isEmpty()
-        )):
+        if not self.color_only and pressed in (self._shortcut_sequences["redo"], self._alternate_redo):
             self._redo()
             return
         if key in {key_code.Key_Delete, key_code.Key_Backspace} and self.selected_items:
@@ -1724,41 +1807,52 @@ class CaptureEditor(QWidget):
             elif self._keyboard_anchor is not None:
                 self._end_keyboard_selection()
             elif not self._embedded:
-                self._complete(_read_option(self.options, "default_action", "copy"))
+                self._complete(self.default_action)
             else:
                 super().keyPressEvent(event)
             return
         if not self._embedded:
-            if key == key_code.Key_Space and not self.color_only:
+            if key == key_code.Key_Space and not mods and not self.color_only:
+                if event.isAutoRepeat():
+                    return
                 if self._keyboard_anchor is not None:
                     self._end_keyboard_selection()
-                else:
+                elif not self.drag_mode:
+                    self._set_tool("select")
                     self._keyboard_anchor = QPoint(
                         max(0, min(self.position.x(), self.rect().right())),
                         max(0, min(self.position.y(), self.rect().bottom())),
                     )
+                    self.original_selection = QRect(self.selection)
+                    self.drag_start = QPoint(self._keyboard_anchor)
                     self.position = QPoint(self._keyboard_anchor)
                     self.drag_mode = "region"
                     self._set_selection(QRect(self.position, QSize(1, 1)))
                 return
-            if control and key == key_code.Key_A:
+            if mods == Qt.KeyboardModifier.ControlModifier and key == key_code.Key_A:
                 if self.color_only:
                     return
                 screen = QApplication.screenAt(self.mapToGlobal(self.position))
                 current = self._local_rect(screen.geometry()) if screen else self.rect()
                 self._set_selection(self.rect() if self.selection == current else current)
+                if self._keyboard_anchor is not None:
+                    self._end_keyboard_selection()
                 return
             if key == key_code.Key_Alt:
                 self._set_magnifying(True)
                 return
-            if key == key_code.Key_M and control:
+            if key == key_code.Key_M and mods == Qt.KeyboardModifier.ControlModifier:
                 self.show_magnifier = not self.show_magnifier
                 self.update()
                 return
-            if key in {key_code.Key_Comma, key_code.Key_Period} and self.history:
-                direction = -1 if key == key_code.Key_Comma else 1
+            if not mods and key in {key_code.Key_Comma, key_code.Key_Period} and self.history:
+                if key == key_code.Key_Period and self.history_index < 0:
+                    return
+                direction = 1 if key == key_code.Key_Comma else -1
                 self.history_index = max(0, min(len(self.history) - 1, self.history_index + direction))
                 self._set_selection(self._local_rect(self.history[self.history_index]))
+                if self._keyboard_anchor is not None:
+                    self._end_keyboard_selection()
                 return
         directions = {
             key_code.Key_Left: QPoint(-1, 0),
@@ -1766,7 +1860,9 @@ class CaptureEditor(QWidget):
             key_code.Key_Up: QPoint(0, -1),
             key_code.Key_Down: QPoint(0, 1),
         }
-        if key in directions and (not self._embedded or self.crop_mode or self.selected_items):
+        if key in directions and not mods & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier) and (
+            not self._embedded or self.crop_mode or self.selected_items
+        ):
             self._nudge(directions[key], resize=shift, large=control)
             return
         super().keyPressEvent(event)
@@ -1777,11 +1873,12 @@ class CaptureEditor(QWidget):
             return
         super().keyReleaseEvent(event)
 
-    def _end_keyboard_selection(self):
+    def _end_keyboard_selection(self, *, cancel=False):
         self._keyboard_anchor = None
         self.drag_mode = ""
-        self._place_toolbar()
-        self.update()
+        self._set_selection(self.original_selection if cancel else self.selection)
+        if cancel:
+            self._update_hover()
 
     def focusNextPrevChild(self, forward):
         if not self._embedded and self.selection.isEmpty() and self.windows:
@@ -1906,15 +2003,18 @@ class CaptureEditor(QWidget):
         if (annotation_items or draft is not None) and not self.crop_mode:
             image = self._selection_base()
             if not image.isNull():
-                key = (QRect(self.selection), annotation_items)
+                key = (QRect(self.selection), QPoint(self._annotation_origin), annotation_items)
                 if key != self._render_key:
-                    self._rendered = render_annotations(image, annotation_items, logical_size=self.selection.size())
+                    self._rendered = render_annotations(
+                        image, self._selection_annotations(annotation_items), logical_size=self.selection.size(),
+                    )
                     self._render_key = key
                 painter.drawImage(QRectF(self.selection), self._rendered)
                 if draft is not None:
                     painter.save()
                     painter.setClipRect(self.selection)
                     painter.translate(self.selection.topLeft())
+                    draft, = self._selection_annotations((draft,))
                     paint_annotation(painter, image, draft, self._rendered, self.selection.size())
                     painter.restore()
         if not self._embedded or self.crop_mode:
@@ -1924,7 +2024,7 @@ class CaptureEditor(QWidget):
         if self.selected_items:
             painter.save()
             painter.setClipRect(self.selection)
-            painter.translate(self.selection.topLeft())
+            painter.translate(self._annotation_origin)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(ACCENT, 1, Qt.PenStyle.DashLine))
             for index in self.selected_items:
@@ -2025,7 +2125,7 @@ class ImageEditor(QDialog):
 
     applied = Signal(QImage)
 
-    def __init__(self, image, *, parent=None, locale="en", annotations=(), options=None):
+    def __init__(self, image, *, parent=None, locale="en", annotations=(), options=None, apply_text=None):
         super().__init__(parent)
         self.result_image = QImage(image)
         self.result_base = QImage(image)
@@ -2046,7 +2146,7 @@ class ImageEditor(QDialog):
         layout.addWidget(viewport, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
         self.apply_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self.apply_button.setText(self.canvas._label("Apply", "应用"))
+        self.apply_button.setText(apply_text or self.canvas._label("Apply", "应用"))
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(self.canvas._label("Cancel", "取消"))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
