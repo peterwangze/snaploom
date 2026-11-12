@@ -6,7 +6,7 @@ import unittest
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QStyle, QStyleFactory, QStyleOptionSpinBox
 
 from snaploom.capture import ScreenFrame, Snapshot
 from snaploom.editor import CaptureEditor
@@ -99,6 +99,95 @@ class DesktopSelectionTests(unittest.TestCase):
             self.assertEqual(editor.document.annotations[0].width, 24)
         finally:
             editor.close()
+
+    @unittest.skipUnless(os.name == "nt", "exercises the Windows 11 spin box style")
+    def test_stroke_width_buttons_preserve_capture_on_the_desktop(self):
+        app = QApplication.instance() or QApplication([])
+        if "windows11" not in {name.lower() for name in QStyleFactory.keys()}:
+            self.skipTest("Qt Windows 11 style is unavailable")
+        self.addCleanup(app.setStyle, app.style().objectName())
+        app.setStyle("windows11")
+        available = app.primaryScreen().availableGeometry()
+
+        def click(widget, point=None, *, double=False):
+            window = widget.window()
+            point = widget.rect().center() if point is None else point
+            local = window.mapFromGlobal(widget.mapToGlobal(point))
+            mouse_click = QTest.mouseDClick if double else QTest.mouseClick
+            mouse_click(window.windowHandle(), Qt.MouseButton.LeftButton, pos=local)
+            app.processEvents()
+
+        def step_points(spin):
+            option = QStyleOptionSpinBox()
+            spin.initStyleOption(option)
+            points = []
+            for control in (QStyle.SubControl.SC_SpinBoxUp, QStyle.SubControl.SC_SpinBoxDown):
+                rect = spin.style().subControlRect(QStyle.ComplexControl.CC_SpinBox, option, control, spin)
+                self.assertTrue(rect.isValid())
+                points.append(rect.center())
+            return points
+
+        for size, floating in ((QSize(740, 500), False), (QSize(200, 158), True)):
+            with self.subTest(floating=floating):
+                geometry = QRect(QPoint(), size.boundedTo(available.size()))
+                geometry.moveCenter(available.center())
+                source = QImage(geometry.size(), QImage.Format.Format_RGB32)
+                source.fill(Qt.GlobalColor.white)
+                selection = QRect(geometry.topLeft() + QPoint(24, 30), QSize(158, 110))
+                editor = CaptureEditor(Snapshot(source, geometry), selection=selection, options={"locale": "zh-CN"})
+                cancelled, completed = [], []
+                editor.cancelled.connect(lambda: cancelled.append(True))
+                editor.completed.connect(lambda *values: completed.append(values))
+                try:
+                    editor.show()
+                    self.assertTrue(QTest.qWaitForWindowExposed(editor, 2000))
+                    self.assertEqual(editor.toolbar.isWindow(), floating)
+                    spin = editor.stroke_width
+                    initial = spin.value()
+                    up, down = step_points(spin)
+                    for point, expected in ((up, initial + 1), (up, initial + 2),
+                                            (down, initial + 1), (down, initial)):
+                        click(spin, point)
+                        self.assertEqual(spin.value(), expected)
+                        self.assertEqual(editor.selected_geometry(), selection)
+                        self.assertTrue(editor.isVisible())
+                    self.assertFalse(editor.document.annotations)
+
+                    click(editor.tool_buttons["pen"])
+                    handle = editor.windowHandle()
+                    start, end = QPoint(48, 62), QPoint(125, 91)
+                    QTest.mousePress(handle, Qt.MouseButton.LeftButton, pos=start)
+                    QTest.mouseMove(handle, end)
+                    QTest.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=end)
+                    original, = editor.document.annotations
+                    click(editor.tool_buttons["select"])
+                    click(editor, QPoint(87, 77))
+                    self.assertEqual(editor.selected_items, {0})
+                    up, down = step_points(spin)
+                    for point, expected in ((up, original.width + 1), (down, original.width)):
+                        click(spin, point)
+                        updated, = editor.document.annotations
+                        self.assertEqual(spin.value(), expected)
+                        self.assertEqual(updated.width, expected)
+                        self.assertEqual(updated.points, original.points)
+                        self.assertEqual(editor.selected_items, {0})
+                        self.assertEqual(editor.selected_geometry(), selection)
+                        self.assertTrue(editor.isVisible())
+
+                    if not floating:
+                        editor._set_selection(editor.rect())
+                        app.processEvents()
+                        up, _ = step_points(spin)
+                        spin.setEnabled(False)
+                        click(spin, up, double=True)
+                        click(editor.toolbar, QPoint(3, 3), double=True)
+                        self.assertEqual(editor.selected_geometry(), geometry)
+                        self.assertEqual(editor.drag_mode, "")
+                        self.assertTrue(editor.toolbar.isVisible())
+                    self.assertEqual(cancelled, [])
+                    self.assertEqual(completed, [])
+                finally:
+                    editor.close()
 
     def test_shrinking_selection_restores_pixels_on_the_desktop_surface(self):
         app = QApplication.instance() or QApplication([])

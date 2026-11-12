@@ -18,11 +18,12 @@ class EditorControlTests(unittest.TestCase):
             raise unittest.SkipTest("Use QT_QPA_PLATFORM=offscreen to isolate capture editor interactions.")
         cls.qt.setQuitOnLastWindowClosed(False)
 
-    def open_editor(self, geometry=None, *, history=(), **options):
+    def open_editor(self, geometry=None, *, selection=None, history=(), **options):
         bounds = geometry or self.qt.primaryScreen().availableGeometry()
         image = QImage(bounds.size(), QImage.Format.Format_RGB32)
         image.fill(Qt.GlobalColor.white)
-        selection = QRect(bounds.topLeft() + QPoint(22, 30), bounds.size() / 2)
+        if selection is None:
+            selection = QRect(bounds.topLeft() + QPoint(22, 30), bounds.size() / 2)
         editor = CaptureEditor(Snapshot(image, bounds), selection=selection, history=history,
                                options={"locale": "zh-CN", **options})
         self.addCleanup(self.close_widget, editor)
@@ -136,6 +137,30 @@ class EditorControlTests(unittest.TestCase):
         self.assertEqual(editor.document.annotations[0].width, 24)
         image = editor.export_image()
         self.assertNotEqual(image.pixelColor(50, 57), QColor(Qt.GlobalColor.white))
+
+    def test_clicks_on_toolbar_padding_do_not_reach_the_canvas(self):
+        selection = self.qt.primaryScreen().availableGeometry()
+        editor = self.open_editor(selection=selection)
+        completed, cancelled = [], []
+        editor.completed.connect(lambda *args: completed.append(args))
+        editor.cancelled.connect(lambda: cancelled.append(True))
+        spin = editor.stroke_width
+        for widget, local in ((spin, QPoint(2, 1)), (editor.toolbar, QPoint(3, 3))):
+            position = editor.mapFromGlobal(widget.mapToGlobal(local))
+            self.assertTrue(editor.selection.contains(position))
+            self.assertIs(editor.childAt(position), widget)
+            handle = editor.windowHandle()
+            QTest.mousePress(handle, Qt.MouseButton.LeftButton, pos=position)
+            self.assertEqual(editor.drag_mode, "")
+            self.assertTrue(editor.toolbar.isVisible())
+            QTest.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=position)
+            QTest.mouseDClick(handle, Qt.MouseButton.LeftButton, pos=position)
+            self.qt.processEvents()
+            self.assertTrue(editor.isVisible())
+            self.assertEqual(editor.selected_geometry(), selection)
+            self.assertEqual(editor.document.annotations, ())
+            self.assertEqual(completed, [])
+            self.assertEqual(cancelled, [])
 
     def test_editing_existing_width_is_one_undo_step(self):
         editor = self.open_editor()

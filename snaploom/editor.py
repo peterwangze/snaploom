@@ -642,6 +642,8 @@ class CaptureEditor(QWidget):
         toolbar.setObjectName("captureToolbar")
         toolbar.setAccessibleName(self._label("Capture toolbar", "截图工具栏"))
         toolbar.setCursor(Qt.CursorShape.ArrowCursor)
+        # Clicks on control padding or disabled controls must not start a canvas gesture.
+        toolbar.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation)
         toolbar.setStyleSheet(
             "QFrame#captureToolbar { background: #172334; color: #f4f7fc; border: 1px solid #52647b; border-radius: 11px; }"
             "QToolButton { color: #f4f7fc; background: transparent; border: 1px solid transparent; border-radius: 5px;"
@@ -653,6 +655,8 @@ class CaptureEditor(QWidget):
             "QLabel, QCheckBox { color: #f4f7fc; }"
             "QComboBox, QSpinBox { color: #f4f7fc; background: #233449; border: 1px solid #52647b;"
             " border-radius: 4px; padding: 2px 3px; }"
+            "QSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 20px; }"
+            "QSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 20px; }"
             "QComboBox QAbstractItemView { color: #f4f7fc; background: #233449; }"
         )
         layout = QVBoxLayout(toolbar)
