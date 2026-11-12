@@ -2,7 +2,7 @@ Snaploom 是离线运行的截图、标注和贴图工具。安装包包含应�
 
 - 滚动截图尚未结束时，再次截图或启动 Snaploom 会回到正在使用的滚动截图面板。面板新增「取消」，可结束本次滚动并重新框选。
 - Windows 安装器会检查当前工作区是否仍有 Snaploom 进程运行。安装前可先完成或取消截图，再从系统托盘退出 Snaploom。
-- Windows 发布验证新增对安装后程序的真实桌面截图检查和运行中升级检查。[交互验证](https://github.com/peterwangze/snaploom/blob/v1.0.11/docs/release-verification.md#1011-滚动截图与-windows-升级)
+- Windows 发布验证新增对安装后程序的真实桌面截图检查和运行中升级检查。[交互验证](https://github.com/peterwangze/snaploom/blob/v1.0.12/docs/release-verification.md#1012-滚动截图与-windows-升级)
 
 | 系统 | 安装包 | 运行条件 |
 | --- | --- | --- |

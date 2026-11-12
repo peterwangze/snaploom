@@ -107,8 +107,7 @@ begin
   Result := '';
   if SnaploomProfileInUse then begin
     Log('Snaploom setup blocked by running instance');
-    Result := 'Snaploom is still running. Finish or cancel the current capture, then right-click the Snaploom tray icon and choose Quit. Run Setup again.' +
-      #13#10#13#10 +
+    Result := 'Snaploom is still running. Finish or cancel the current capture, then right-click the Snaploom tray icon and choose Quit. Run Setup again.' + #13#10#13#10 +
       'Snaploom 仍在运行。请先完成或取消当前截图，然后右键单击 Snaploom 托盘图标并选择「退出」，再运行安装程序。';
   end;
 end;
