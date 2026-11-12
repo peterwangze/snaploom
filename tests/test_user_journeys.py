@@ -8,7 +8,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF,
 from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QLabel, QMessageBox, QPushButton, QSpinBox,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox,
     QSystemTrayIcon, QTabWidget, QTextEdit, QToolButton,
 )
 
@@ -29,7 +29,7 @@ class UserJourneyTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.folder = Path(directory.name)
+        self.folder = Path(directory.name).resolve()
         self.qt.clipboard().clear()
         self.addCleanup(self.qt.clipboard().clear)
         self.application = None
@@ -181,7 +181,8 @@ class UserJourneyTests(unittest.TestCase):
         expected_buttons = {app.tr(en, zh) for en, zh, _ in workspace} | {app.tr("Pin clipboard content", "悬浮剪贴板内容")}
         self.assertEqual({button.text() for button in app.dashboard.findChildren(QPushButton) if button.isVisible()},
                          expected_buttons)
-        self.assertEqual({item.text() for item in app.tray_menu.actions() if not item.isSeparator() and item.menu() is None},
+        self.assertEqual({item.text() for item in app.tray_menu.actions()
+                          if item.isVisible() and not item.isSeparator() and item.menu() is None},
                          {app.tr(en, zh) for en, zh, _ in tray})
         with patch.object(app, "action") as dispatch, patch.object(app, "paste") as paste:
             for en, zh, command in workspace:
@@ -361,33 +362,97 @@ class UserJourneyTests(unittest.TestCase):
             ("", "PNG (*.png)"),
             (str(filename), "PNG (*.png)"),
         ]):
-            self.click(self.button(editor.toolbar, "Save", "保存", QToolButton))
+            self.click(self.button(editor.toolbar, "Save As…", "另存为…", QToolButton))
             self.assertIs(self.application.editor, editor)
             self.assertTrue(editor.isVisible())
             self.assertEqual(editor.selected_geometry(), self.selection)
             self.assertEqual(self.application.workspace.history(), [])
-            self.click(self.button(editor.toolbar, "Save", "保存", QToolButton))
+            self.click(self.button(editor.toolbar, "Save As…", "另存为…", QToolButton))
         self.assertIsNone(self.application.editor)
         exported = QImage(str(filename.with_suffix(".png")))
         self.assertEqual(exported.size(), self.selection.size())
         self.assertEqual(exported.pixelColor(0, 0), QColor("#f0f4f8"))
         self.assertEqual(self.application.workspace.regions(), [self.selection])
 
-    def test_quick_save_and_copy_as_file_create_readable_images(self):
+    def test_quick_save_reports_path_and_opens_save_location_from_workspace_and_tray(self):
+        app = self.application
         editor = self.open_capture()
         self.select_region(editor)
-        self.capture_menu_action(editor, "Quick save", "快速保存")
+        with patch.object(QFileDialog, "getSaveFileName") as choose:
+            self.capture_menu_action(editor, "Quick save", "快速保存")
+        choose.assert_not_called()
         quick_save, = self.folder.glob("*.png")
         self.assertEqual(QImage(str(quick_save)).size(), self.selection.size())
+        location = self.button(app.dashboard, "Open save location", "打开保存位置")
+        self.assertIn(str(quick_save), app.dashboard.status.text())
+        self.assertEqual(location.toolTip(), str(quick_save))
+        app.rebuild_tray()
+        with patch("snaploom.app.QDesktopServices.openUrl", return_value=True) as open_url:
+            self.click(location)
+            self.tray_item("Open save location", "打开保存位置")
+        self.assertEqual([Path(call.args[0].toLocalFile()) for call in open_url.call_args_list], [self.folder] * 2)
+
+    def test_copy_file_shows_save_as_dialog_and_copies_the_file_chosen_by_keyboard(self):
+        app = self.application
+        app.workspace.set("format", "jpg")
+        target = self.folder / "发布 截图.jpg"
         editor = self.open_capture()
         self.select_region(editor)
-        self.capture_menu_action(editor, "Copy image as file", "复制为文件")
+        choose_file = QFileDialog.getSaveFileName
+        selections = []
+        failures = []
+
+        def pick_file(*args):
+            def enter_filename():
+                dialog = self.qt.activeModalWidget()
+                try:
+                    self.assertIsInstance(dialog, QFileDialog)
+                    self.assertEqual(dialog.windowTitle(), app.tr("Save As and Copy File", "另存为并复制文件"))
+                    self.assertEqual(dialog.selectedNameFilter(), "JPEG (*.jpg *.jpeg)")
+                    entry = dialog.findChild(QLineEdit, "fileNameEdit")
+                    entry.setText(str(target))
+                    save = dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Save)
+                    QTest.keyClick(save, Qt.Key.Key_Space)
+                    if dialog.isVisible():
+                        self.fail("Save As stayed open after confirming a valid file name.")
+                except Exception as error:
+                    failures.append(error)
+                    if dialog is not None:
+                        dialog.reject()
+
+            QTimer.singleShot(0, enter_filename)
+            selected = choose_file(*args, QFileDialog.Option.DontUseNativeDialog)
+            selections.append(selected)
+            return selected
+
+        with patch.object(QFileDialog, "getSaveFileName", side_effect=pick_file):
+            self.capture_menu_action(editor, "Save As and Copy File…", "另存为并复制文件…")
+        if failures:
+            raise failures[0]
+        [(name, _)] = selections
+        self.assertEqual(Path(name), target)
         link, = self.qt.clipboard().mimeData().urls()
-        copied = Path(link.toLocalFile())
-        self.assertTrue(copied.parent.samefile(self.folder))
-        self.assertNotEqual(copied, quick_save)
-        self.assertEqual(QImage(str(copied)).size(), self.selection.size())
-        self.assertEqual(self.application.workspace.regions(), [self.selection, self.selection])
+        self.assertEqual(Path(link.toLocalFile()), target)
+        self.assertEqual(QImage(str(target)).size(), self.selection.size())
+        self.assertIn(str(target), app.dashboard.status.text())
+        self.assertEqual(app.workspace.regions(), [self.selection])
+
+    def test_save_as_confirms_replacing_the_existing_file_after_appending_extension(self):
+        app = self.application
+        base = self.folder / "existing"
+        existing = base.with_suffix(".bmp")
+        existing.write_bytes(b"existing file")
+        with (
+            patch.object(QFileDialog, "getSaveFileName", return_value=(str(base), "Bitmap (*.bmp)")),
+            patch.object(QMessageBox, "question", side_effect=[QMessageBox.StandardButton.No,
+                                                              QMessageBox.StandardButton.Yes]) as confirm,
+        ):
+            self.assertIsNone(app.save_dialog(self.image))
+            self.assertEqual(existing.read_bytes(), b"existing file")
+            self.assertEqual(app.save_dialog(self.image), existing)
+        self.assertEqual(confirm.call_count, 2)
+        self.assertIn(str(existing), confirm.call_args.args[2])
+        self.assertEqual(QImage(str(existing)).size(), self.image.size())
 
     def test_scripted_region_writes_a_file_and_copies_the_same_selection(self):
         app = self.application
@@ -398,6 +463,7 @@ class UserJourneyTests(unittest.TestCase):
         app.command(command, lambda **result: response.append(result))
         self.until(lambda: bool(response), "Scripted capture did not report completion.")
         self.assertEqual(response[0]["code"], 0)
+        self.assertEqual(Path(response[0]["text"]), path)
         self.assertIsNone(app.editor)
         saved = QImage(str(path))
         copied = self.qt.clipboard().image()

@@ -482,7 +482,7 @@ class PinWindow(QWidget):
     def populate_menu(self, menu):
         thumbnail = self.state["thumbnail"]
         copy_label = ("Copy full image", "复制完整图像") if thumbnail else ("Copy image", "复制图像")
-        save_label = ("Save full image as…", "另存完整图像…") if thumbnail else ("Save as…", "另存为…")
+        save_label = ("Save full image as…", "另存完整图像…") if thumbnail else ("Save As…", "另存为…")
         crop_label = ("Crop current frame…", "裁剪当前帧…") if self.movie else ("Crop…", "裁剪…")
         entries = (
             ("copy", *copy_label), ("save", *save_label),

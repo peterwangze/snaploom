@@ -751,7 +751,7 @@ class CaptureEditor(QWidget):
                     shortcut=" / ".join(filter(None, (self._shortcut_label("copy"), "Enter"))),
                 )
                 self._button(actions, self._label("Pin", "贴图"), lambda: self._complete("pin"), shortcut=self._shortcut_label("pin"))
-                self._button(actions, self._label("Save", "保存"), lambda: self._complete("save"), shortcut=self._shortcut_label("save"))
+                self._button(actions, self._label("Save As…", "另存为…"), lambda: self._complete("save"), shortcut=self._shortcut_label("save"))
             primary.setObjectName("copyCapture")
             more = self._button(actions, self._label("More", "更多"), lambda: None)
             more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -765,7 +765,7 @@ class CaptureEditor(QWidget):
         if self.default_action != "output":
             for key, english, chinese in (
                 ("quick-save", "Quick save", "快速保存"),
-                ("copy-file", "Copy image as file", "复制为文件"),
+                ("copy-file", "Save As and Copy File…", "另存为并复制文件…"),
                 ("ocr", "Extract text", "提取文字"),
                 ("barcode", "Scan barcode or QR code", "识别条形码或二维码"),
                 ("print", "Print", "打印"),

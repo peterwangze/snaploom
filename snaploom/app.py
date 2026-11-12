@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QLocale, QLockFile, QMimeData, QObject, QPoint, QProcess, QRect, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QCursor, QIcon, QImage
+from PySide6.QtGui import QColor, QCursor, QDesktopServices, QIcon, QImage
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout,
@@ -68,6 +68,7 @@ class Application:
         self.pin_windows = {}
         self.closed_pins = []
         self.last_region = next(iter(self.workspace.regions()), None)
+        self.last_saved_file = None
         self.group = self.workspace.get("current_group") or "Default"
         self.previous_group = self.group
         self.hotkeys_enabled = True
@@ -148,6 +149,10 @@ class Application:
             ("paste", "Pin clipboard content", "悬浮剪贴板内容"), ("open", "Open image…", "打开图像…"),
         ):
             self.tray_menu.addAction(self.tr(en, zh), lambda checked=False, name=action: self.action(name))
+        self.tray_save_location = self.tray_menu.addAction(
+            self.tr("Open save location", "打开保存位置"), self.open_save_location,
+        )
+        self.tray_save_location.setVisible(self.last_saved_file is not None)
         self.tray_menu.addSeparator()
         groups = self.tray_menu.addMenu(self.tr("Pin groups", "贴图分组"))
         for name in self.groups():
@@ -240,6 +245,8 @@ class Application:
             files, _ = QFileDialog.getOpenFileNames(self.dashboard, self.tr("Open image", "打开图像"), "",
                                                    self.tr("Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tiff *.svg)", "图像 (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tiff *.svg)"))
             self.open_files(files)
+        elif action == "open-save-location":
+            self.open_save_location()
         elif action == "toggle_pins":
             self.toggle_pins()
         elif action == "click_through":
@@ -539,7 +546,7 @@ class Application:
 
     def _complete_editor_output(self, action, image, rect):
         editor = self.editor
-        if action in {"save", "print"}:
+        if action in {"save", "copy-file", "print"}:
             editor.hide()
 
         def restore_editor():
@@ -564,7 +571,7 @@ class Application:
             done = context.get("done")
             try:
                 history_action = "saved" if action == "save" else action
-                self._record_output(image, rect, history_action, already_saved=action in {"save", "quick-save"})
+                self._record_output(image, rect, history_action, already_saved=action in {"save", "quick-save", "copy-file"})
             except (OSError, RuntimeError, ValueError) as error:
                 self.failure(str(error), done)
                 return
@@ -623,7 +630,7 @@ class Application:
             return
         context = self.release_capture()
         self.last_region = QRect(rect)
-        self.status(str(path))
+        self.report_saved_file(path)
         self.workspace.remember(image, rect, name)
         self.update_lists()
         if context.get("done"):
@@ -661,20 +668,20 @@ class Application:
         steps.sort(key=lambda step: order.index(step[0]))
         silent = "silent" in outputs
 
-        def execute(index, text=""):
+        def execute(index, result=""):
             if index == len(steps):
                 self.workspace.remember(image, rect, " / ".join(outputs))
                 if self.workspace.get("auto_save") and "no-auto-save" not in outputs and not (
-                    {action for action, _ in steps} & {"file", "quick-save", "save"}
+                    {action for action, _ in steps} & {"file", "quick-save", "save", "copy-file"}
                 ):
                     try:
-                        self.quick_save(image)
+                        self.report_saved_file(self.quick_save(image), silent=True)
                     except OSError as error:
                         self.failure(str(error), done)
                         return
                 self.update_lists()
                 if done:
-                    done(code=0, text=text)
+                    done(code=0, text=result)
                 return
             action, target = steps[index]
 
@@ -683,14 +690,14 @@ class Application:
                     if done:
                         done(code=code, error=error)
                 else:
-                    execute(index + 1, text)
+                    execute(index + 1, text or result)
 
-            self.output(image, action, rect, following, target, silent=silent, record=False)
+            self.output(image, action, rect, following, target, silent=silent, record=False, prompt_file=False)
 
         execute(0)
 
     def output(self, image, action, rect=None, done=None, target=None, *, silent=False, record=True, on_error=None,
-               dialog_parent=None):
+               dialog_parent=None, prompt_file=True):
         rect = QRect(rect) if rect is not None else QRect()
         text = ""
         try:
@@ -703,12 +710,20 @@ class Application:
                     image = QImage(image)
                     image.setDevicePixelRatio(max(1.0, image.width() / max(1, rect.width())))
                 self.open_pin(image, rect.topLeft() if rect.isValid() else None)
-            elif action == "save":
-                target = self.save_dialog(image, parent=dialog_parent)
+            elif action in {"save", "copy-file"}:
+                if action == "copy-file" and not prompt_file:
+                    target = self.quick_save(image)
+                else:
+                    title = self.tr("Save As and Copy File", "另存为并复制文件") if action == "copy-file" else None
+                    target = self.save_dialog(image, parent=dialog_parent, title=title)
                 if not target:
                     if done:
                         done(code=1, error="Save cancelled.")
                     return
+                if action == "copy-file":
+                    mime = QMimeData()
+                    mime.setUrls([QUrl.fromLocalFile(str(target))])
+                    self.qt.clipboard().setMimeData(mime)
             elif action in {"quick-save", "silent"}:
                 target = self.quick_save(image)
             elif action == "file":
@@ -724,19 +739,12 @@ class Application:
             elif action in {"ocr", "ocr-copy", "barcode", "barcode-copy"}:
                 self.start_recognition(image, action, done)
                 done = None
-            elif action == "copy-file":
-                path = self.quick_save(image)
-                mime = QMimeData()
-                mime.setUrls([QUrl.fromLocalFile(str(path))])
-                self.qt.clipboard().setMimeData(mime)
-                self.notify(self.tr("Image file copied", "图像文件已复制"))
             elif action not in {"success", "saved"}:
                 raise ValueError(f"Unknown output: {action}")
             if target:
                 text = str(target)
-                if action != "silent" and not silent:
-                    self.notify(self.tr(f"Saved to {target}", f"已保存至 {target}"))
-                if self.workspace.get("copy_after_save"):
+                self.report_saved_file(target, copied_file=action == "copy-file", silent=silent or action == "silent")
+                if action != "copy-file" and self.workspace.get("copy_after_save"):
                     self.copy_image(image)
             if record:
                 self._record_output(image, rect, action, already_saved=bool(target))
@@ -752,14 +760,32 @@ class Application:
         if done:
             done(code=0, text=text)
 
+    def report_saved_file(self, path, *, copied_file=False, silent=False):
+        self.last_saved_file = Path(path)
+        self.dashboard.save_location_button.setToolTip(str(path))
+        self.dashboard.save_location_button.show()
+        self.tray_save_location.setVisible(True)
+        if not silent:
+            if copied_file:
+                self.notify(self.tr(f"File copied to clipboard. Saved to {path}", f"文件已复制到剪贴板。保存位置为 {path}"))
+            else:
+                self.notify(self.tr(f"Saved to {path}", f"已保存至 {path}"))
+
+    def open_save_location(self):
+        if self.last_saved_file is None:
+            return
+        folder = self.last_saved_file.parent
+        if not folder.is_dir() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+            self.notify(self.tr(f"Could not open the save folder {folder}", f"无法打开保存位置 {folder}"), error=True)
+
     def _record_output(self, image, rect, action, *, already_saved):
         if not rect.isValid():
             return
         self.workspace.remember(image, rect, action)
         self.update_lists()
-        if not already_saved and action != "copy-file" and self.workspace.get("auto_save"):
+        if not already_saved and self.workspace.get("auto_save"):
             try:
-                self.quick_save(image)
+                self.report_saved_file(self.quick_save(image), silent=True)
             except (OSError, RuntimeError, ValueError) as error:
                 self.notify(self.tr(f"Automatic save failed. {error}", f"自动保存失败。{error}"), error=True)
 
@@ -796,25 +822,36 @@ class Application:
             path = folder / f"{filename}_{index}.{ext}"
         raise OSError("Too many files use this filename pattern.")
 
-    def save_dialog(self, image, *, parent=None):
+    def save_dialog(self, image, *, parent=None, title=None):
         ext = self.workspace.get("format")
         folder = Path(self.workspace.get("save_folder") or pictures_directory()).expanduser()
         try:
-            folder.mkdir(parents=True, exist_ok=True)
+            if not folder.is_dir():
+                folder = next((candidate for candidate in (folder.parent, pictures_directory().parent)
+                               if candidate.is_dir()), Path.home())
         except OSError:
-            folder = self.workspace.directory
-        initial = folder / f"{datetime.now():Snaploom_%Y-%m-%d_%H-%M-%S}.{ext}"
+            folder = Path.home()
+        initial = folder / f"{datetime.now():Snaploom_%Y-%m-%d_%H-%M-%S}"
+        filters = {"png": "PNG (*.png)", "jpg": "JPEG (*.jpg *.jpeg)", "webp": "WebP (*.webp)", "bmp": "Bitmap (*.bmp)"}
+        owner = parent if parent is not None else self.dashboard if self.dashboard.isVisible() else None
         path, selected = QFileDialog.getSaveFileName(
-            parent if parent is not None else self.dashboard if self.dashboard.isVisible() else None,
-            self.tr("Save screenshot", "保存截图"), str(initial),
-            "PNG (*.png);;JPEG (*.jpg *.jpeg);;WebP (*.webp);;Bitmap (*.bmp)",
+            owner, title or self.tr("Save Image As", "另存图像"), str(initial),
+            ";;".join(filters.values()), filters.get(ext, filters["png"]),
         )
         if not path:
             return None
         target = Path(path)
         if not target.suffix:
-            match = re.search(r"\*\.(\w+)", selected)
-            target = target.with_suffix("." + (match.group(1) if match else ext))
+            suffix = next((extension for extension, label in filters.items() if label == selected), ext)
+            target = target.with_suffix("." + suffix)
+            if target.is_file():
+                choice = QMessageBox.question(
+                    owner, self.tr("Replace existing file?", "替换已有文件？"),
+                    self.tr(f"Replace {target}?", f"要替换 {target} 吗？"),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
+                )
+                if choice != QMessageBox.StandardButton.Yes:
+                    return None
         return save_image(image, target)
 
     def open_pin(self, image, position=None, pin_id=None, state=None, restore=False):
@@ -945,7 +982,7 @@ class Application:
                 text = color.name().upper()
                 self.replace_pin_source(pin_id, text_image(text), {"source_text": text, "color_card": text})
         else:
-            self.output(window.view, action)
+            self.output(window.view, action, dialog_parent=window if action == "save" else None)
         self.update_lists()
 
     def update_pin_image(self, pin_id, updated, annotations, *, cropped=False):
@@ -1319,7 +1356,7 @@ class Application:
         layout.addWidget(status)
         buttons = QHBoxLayout()
         add = QPushButton(self.tr("Add next frame", "添加下一帧"))
-        save = QPushButton(self.tr("Save…", "保存…"))
+        save = QPushButton(self.tr("Save As…", "另存为…"))
         copy = QPushButton(self.tr("Copy", "复制"))
         pin = QPushButton(self.tr("Pin", "贴图"))
         for button in (add, save, copy, pin):

@@ -23,9 +23,9 @@ HOTKEY_ZH = {
     "repeat": "重复上次区域", "click_through": "切换贴图鼠标穿透", "active": "截取当前窗口",
 }
 EDITOR_ACTIONS = {
-    "copy": ("Copy screenshot", "复制截图"), "save": ("Save as…", "另存为…"),
+    "copy": ("Copy screenshot", "复制截图"), "save": ("Save As…", "另存为…"),
     "pin": ("Pin screenshot", "悬浮截图"), "quick-save": ("Quick save", "快速保存"),
-    "copy-file": ("Copy as image file", "复制为图像文件"), "refresh": ("Refresh screenshot", "刷新截图"),
+    "copy-file": ("Save As and Copy File…", "另存为并复制文件…"), "refresh": ("Refresh screenshot", "刷新截图"),
     "color": ("Copy pixel color", "复制像素颜色"), "undo": ("Undo step", "撤销一步"),
     "redo": ("Redo step", "重做一步"),
 }
@@ -98,7 +98,7 @@ class Dashboard(QWidget):
         self.pin_list.open_requested.connect(lambda item_id: self.pin_action.emit("show", item_id))
         history_page = self.list_page(self.history_list, [
             ("preview", "Preview", "预览"), ("copy", "Copy", "复制"), ("pin", "Pin", "贴图"),
-            ("save", "Save", "保存"), ("delete", "Delete", "删除"), ("clear", "Clear history…", "清空历史…"),
+            ("save", "Save As…", "另存为…"), ("delete", "Delete", "删除"), ("clear", "Clear history…", "清空历史…"),
         ], self.history_action)
         pins_page = self.list_page(self.pin_list, [
             ("show", "Show", "显示"), ("hide", "Hide", "隐藏"), ("recover", "Recover off-screen", "找回屏幕外贴图"),
@@ -116,6 +116,10 @@ class Dashboard(QWidget):
         self.status.setWordWrap(True)
         self.status.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         bottom.addWidget(self.status)
+        self.save_location_button = QPushButton(self.tr("Open save location", "打开保存位置"))
+        self.save_location_button.clicked.connect(lambda: self.action.emit("open-save-location"))
+        self.save_location_button.hide()
+        bottom.addWidget(self.save_location_button)
         help_button = QPushButton(self.tr("Help", "操作帮助"))
         help_button.clicked.connect(lambda: self.action.emit("help"))
         bottom.addWidget(help_button)
@@ -236,7 +240,7 @@ class Dashboard(QWidget):
         actions = {
             "copy": ("Copied", "已复制"), "pin": ("Pinned", "已贴图"),
             "save": ("Saved", "已保存"), "saved": ("Saved", "已保存"),
-            "quick-save": ("Quick saved", "已快速保存"), "copy-file": ("File copied", "已复制为文件"),
+            "quick-save": ("Quick saved", "已快速保存"), "copy-file": ("File copied", "已保存并复制文件"),
             "print": ("Printed", "已打印"), "ocr": ("Text recognized", "已识别文字"),
             "barcode": ("Code scanned", "已识别条码"),
         }
@@ -390,7 +394,7 @@ class Preferences(QDialog):
         self.fields["save_folder"] = folder
         pattern = QLineEdit(workspace.get("save_pattern"))
         pattern.setToolTip("Python strftime, %title%, %width%, %height%")
-        output_form.addRow(self.tr("Filename pattern", "文件名模板"), pattern)
+        output_form.addRow(self.tr("Quick-save filename pattern", "快速保存文件名模板"), pattern)
         self.fields["save_pattern"] = pattern
         corner = QSpinBox()
         corner.setRange(0, 1024)
