@@ -128,9 +128,9 @@ Windows 已通过原生保存对话框验证文件名输入、JPEG 写入和生�
 - 默认复制和保存图片只更新工作台状态栏，验证图片像素和文件正常输出。启用「设置 → 输出 → 显示操作成功通知」后，核对应用向系统托盘发送的通知。
 - 核对操作失败、需要补充剪贴板内容和命令行静默输出。设置页测试覆盖开关保存与重启后的恢复。
 
-## 1.0.16 Windows 图像粘贴
+## 1.0.17 Windows 图像粘贴
 
-- Windows 普通「复制」同时提供标准位图和名为 `PNG` 的原生剪贴板格式。使用独立进程从 Windows 剪贴板读取 PNG，验证普通截图与透明图片的尺寸、颜色和透明度。该格式是 Codex CLI 的 Windows 剪贴板读取路径优先读取的图像格式。[arboard 读取实现](https://github.com/1Password/arboard/blob/v3.6.1/src/platform/windows.rs#L575-L592)
+- Windows 普通「复制」先提供名为 `PNG` 的原生剪贴板格式，同时提供标准位图。独立进程分别用 Win32 和 iCode 使用的 Pillow 读取剪贴板，验证普通截图、透明图像以及编辑器使用的预乘透明图像的尺寸、颜色和透明度。[iCode 读取实现](https://github.com/openJiuwen-ai/iCode/blob/v0.35.2/src/chrys/app/tui/widgets/chrome/image_paste.py) · [Pillow 格式选择](https://github.com/python-pillow/Pillow/blob/13.0.0/src/display.c#L440-L470)
 
 ## 发布包的环境边界
 

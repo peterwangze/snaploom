@@ -665,12 +665,12 @@ class Application:
 
     def copy_image(self, image):
         mime = QMimeData()
-        mime.setImageData(image)
         png = QByteArray(png_bytes(image))
-        mime.setData("image/png", png)
         if sys.platform == "win32":
-            # Windows applications can request the registered PNG clipboard format by name.
+            # Clipboard readers such as Pillow try formats in the order we publish them.
             mime.setData('application/x-qt-windows-mime;value="PNG"', png)
+        mime.setImageData(image)
+        mime.setData("image/png", png)
         self.qt.clipboard().setMimeData(mime)
 
     def output_pipeline(self, image, rect, outputs, done):

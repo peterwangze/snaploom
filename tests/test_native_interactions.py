@@ -35,7 +35,7 @@ from io import BytesIO
 import json
 import time
 
-from PIL import Image
+from PIL import Image, ImageGrab
 
 user = C.WinDLL("user32", use_last_error=True)
 kernel = C.WinDLL("kernel32", use_last_error=True)
@@ -78,7 +78,15 @@ finally:
 
 with Image.open(BytesIO(payload), formats=["PNG"]) as source:
     image = source.convert("RGBA")
-    print(json.dumps({"size": image.size, "pixel": image.getpixel((2, 3)), "has_dib": has_dib}))
+    grabbed = ImageGrab.grabclipboard()
+    if not isinstance(grabbed, Image.Image):
+        raise RuntimeError("Pillow did not read the Windows clipboard as an image")
+    with grabbed:
+        print(json.dumps({
+            "size": image.size, "pixel": image.getpixel((2, 3)), "has_dib": has_dib,
+            "grabbed_format": grabbed.format, "grabbed_size": grabbed.size,
+            "grabbed_pixel": grabbed.convert("RGBA").getpixel((2, 3)),
+        }))
 """
         with TemporaryDirectory() as directory:
             app = Application(qt, Path(directory), testing=True)
@@ -88,6 +96,7 @@ with Image.open(BytesIO(payload), formats=["PNG"]) as source:
                 for format_, color in (
                     (QImage.Format.Format_RGB32, QColor(35, 88, 159)),
                     (QImage.Format.Format_ARGB32, QColor(35, 88, 159, 117)),
+                    (QImage.Format.Format_ARGB32_Premultiplied, QColor(35, 88, 159, 117)),
                 ):
                     with self.subTest(image_format=format_):
                         image = QImage(16, 12, format_)
@@ -108,8 +117,11 @@ with Image.open(BytesIO(payload), formats=["PNG"]) as source:
                             self.assertEqual(process.exitCode(), 0, stderr)
                             data = json.loads(bytes(process.readAllStandardOutput()))
                             self.assertEqual(data["size"], [image.width(), image.height()])
-                            self.assertEqual(data["pixel"], list(color.getRgb()))
+                            self.assertEqual(data["pixel"], list(image.pixelColor(2, 3).getRgb()))
                             self.assertTrue(data["has_dib"])
+                            self.assertEqual(data["grabbed_format"], "PNG")
+                            self.assertEqual(data["grabbed_size"], data["size"])
+                            self.assertEqual(data["grabbed_pixel"], data["pixel"])
                         finally:
                             if process.state() != QProcess.ProcessState.NotRunning:
                                 process.kill()

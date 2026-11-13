@@ -1,6 +1,6 @@
 Snaploom 是离线运行的截图、标注和贴图工具。安装包包含应用、运行环境和 OCR 模型。
 
-- Windows 复制截图时同时写入原生 PNG，供 Codex CLI 等支持图像粘贴的终端应用读取。[剪贴板验证](https://github.com/peterwangze/snaploom/blob/v1.0.16/docs/release-verification.md#1016-windows-图像粘贴)
+- Windows 复制截图时优先提供原生 PNG，支持 iCode 的图像粘贴。在 iCode 输入框按 **Shift + Insert** 插入截图。[剪贴板验证](https://github.com/peterwangze/snaploom/blob/v1.0.17/docs/release-verification.md#1017-windows-图像粘贴)
 - 复制图片、保存和复制识别结果默认只更新工作台状态栏。「设置 → 输出 → 显示操作成功通知」可开启桌面通知。失败和需要操作的提示照常显示。
 - 工作台和托盘可直接打开最近保存目录。「已保存文件」保留最近 50 个不同的路径，支持打开所在文件夹、复制路径和清空记录。
 
