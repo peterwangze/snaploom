@@ -19,7 +19,7 @@ jobs:
         shell: pwsh
         run: |
           git clone --quiet --depth 1 --branch v0.35.2 https://github.com/openJiuwen-ai/iCode.git "$env:RUNNER_TEMP/icode"
-          python -m pip install pillow==13.0.0
+          python -m pip install pillow==13.0.0 charset-normalizer==3.5.2
           "ICODE_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> $env:GITHUB_ENV
           "ICODE_SOURCE=$env:RUNNER_TEMP/icode/src" >> $env:GITHUB_ENV
       - uses: actions/setup-python@v5
