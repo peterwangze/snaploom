@@ -176,7 +176,7 @@ class UserJourneyTests(unittest.TestCase):
             *common, ("Open Snaploom", "打开 Snaploom", "dashboard"), ("Repeat last capture", "重复上次区域", "repeat"),
             ("Pin clipboard content", "悬浮剪贴板内容", "paste"), ("Recover off-screen pins", "找回屏幕外贴图", "recover"),
             ("Disable click-through for all pins", "关闭所有贴图的鼠标穿透", "no-click-through"),
-            ("History", "历史", "history"), ("Quit", "退出", "quit"),
+            ("History", "历史", "history"), ("Saved files", "已保存文件", "saved-files"), ("Quit", "退出", "quit"),
         )
         expected_buttons = {app.tr(en, zh) for en, zh, _ in workspace} | {app.tr("Pin clipboard content", "悬浮剪贴板内容")}
         self.assertEqual({button.text() for button in app.dashboard.findChildren(QPushButton) if button.isVisible()},
@@ -367,6 +367,7 @@ class UserJourneyTests(unittest.TestCase):
             self.assertTrue(editor.isVisible())
             self.assertEqual(editor.selected_geometry(), self.selection)
             self.assertEqual(self.application.workspace.history(), [])
+            self.assertEqual(self.application.dashboard.export_list.count(), 0)
             self.click(self.button(editor.toolbar, "Save As…", "另存为…", QToolButton))
         self.assertIsNone(self.application.editor)
         exported = QImage(str(filename.with_suffix(".png")))
@@ -374,8 +375,9 @@ class UserJourneyTests(unittest.TestCase):
         self.assertEqual(exported.pixelColor(0, 0), QColor("#f0f4f8"))
         self.assertEqual(self.application.workspace.regions(), [self.selection])
 
-    def test_quick_save_reports_path_and_opens_save_location_from_workspace_and_tray(self):
+    def test_quick_save_reports_path_and_remembers_save_location_after_restart(self):
         app = self.application
+        self.assertFalse(app.dashboard.save_location_button.isVisible())
         editor = self.open_capture()
         self.select_region(editor)
         with patch.object(QFileDialog, "getSaveFileName") as choose:
@@ -383,14 +385,113 @@ class UserJourneyTests(unittest.TestCase):
         choose.assert_not_called()
         quick_save, = self.folder.glob("*.png")
         self.assertEqual(QImage(str(quick_save)).size(), self.selection.size())
-        location = self.button(app.dashboard, "Open save location", "打开保存位置")
+        location = self.button(app.dashboard, "Open last save location", "打开最近保存位置")
         self.assertIn(str(quick_save), app.dashboard.status.text())
         self.assertEqual(location.toolTip(), str(quick_save))
         app.rebuild_tray()
         with patch("snaploom.app.QDesktopServices.openUrl", return_value=True) as open_url:
             self.click(location)
-            self.tray_item("Open save location", "打开保存位置")
-        self.assertEqual([Path(call.args[0].toLocalFile()) for call in open_url.call_args_list], [self.folder] * 2)
+            self.tray_item("Open last save location", "打开最近保存位置")
+            self.stop_application()
+            self.start_application()
+            self.click(self.button(self.application.dashboard, "Open last save location", "打开最近保存位置"))
+            self.tray_item("Open last save location", "打开最近保存位置")
+        self.assertEqual([Path(call.args[0].toLocalFile()) for call in open_url.call_args_list], [self.folder] * 4)
+
+    def test_saved_files_survive_restart_and_open_the_selected_folder(self):
+        app = self.application
+        earlier = self.folder / "Screenshots" / "first capture.png"
+        latest = self.folder / "Review" / "复核 截图.png"
+        for path in (earlier, latest):
+            path.parent.mkdir()
+            editor = self.open_capture()
+            self.select_region(editor)
+            with patch.object(QFileDialog, "getSaveFileName", return_value=(str(path), "PNG (*.png)")):
+                self.click(self.button(editor.toolbar, "Save As…", "另存为…", QToolButton))
+            self.assertEqual(QImage(str(path)).size(), self.selection.size())
+
+        self.select_tab(3)
+        self.assertEqual(app.dashboard.tabs.tabText(3), app.tr("Saved files", "已保存文件"))
+        export_list = app.dashboard.export_list
+        self.assertEqual(export_list.count(), 2)
+        rows = [export_list.item(index).text() for index in range(export_list.count())]
+        for row, path in zip(rows, (latest, earlier)):
+            self.assertIn(path.name, row)
+            self.assertIn(str(path.parent), row)
+            self.assertRegex(row, r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+
+        self.stop_application()
+        self.start_application()
+        app = self.application
+        app.dashboard.hide()
+        self.tray_item("Saved files", "已保存文件")
+        self.assertTrue(app.dashboard.isVisible())
+        self.assertEqual(app.dashboard.tabs.currentIndex(), 3)
+        export_list = app.dashboard.export_list
+        self.assertEqual([export_list.item(index).text() for index in range(export_list.count())], rows)
+        earlier_row = export_list.visualItemRect(export_list.item(1)).center()
+        self.click(export_list.viewport(), earlier_row)
+        self.click(self.button(app.dashboard, "Copy file path", "复制文件路径"))
+        self.assertEqual(self.qt.clipboard().text(), str(earlier))
+
+        with patch("snaploom.app.QDesktopServices.openUrl", return_value=True) as open_url:
+            self.click(self.button(app.dashboard, "Open folder", "打开所在文件夹"))
+            export_list.setFocus()
+            QTest.keyClick(export_list, Qt.Key.Key_Return)
+            latest_row = export_list.visualItemRect(export_list.item(0)).center()
+            self.click(export_list.viewport(), latest_row)
+            local = app.dashboard.mapFromGlobal(export_list.viewport().mapToGlobal(latest_row))
+            QTest.mouseDClick(app.dashboard.windowHandle(), Qt.MouseButton.LeftButton, pos=local)
+        self.assertEqual([Path(call.args[0].toLocalFile()) for call in open_url.call_args_list],
+                         [earlier.parent, earlier.parent, latest.parent])
+
+    def test_missing_export_folder_and_clear_records_preserve_screenshot_history(self):
+        app = self.application
+        retained = self.folder / "retained.png"
+        missing = self.folder / "Moved folder" / "capture.png"
+        missing.parent.mkdir()
+        for path in (retained, missing):
+            editor = self.open_capture()
+            self.select_region(editor)
+            with patch.object(QFileDialog, "getSaveFileName", return_value=(str(path), "PNG (*.png)")):
+                self.click(self.button(editor.toolbar, "Save As…", "另存为…", QToolButton))
+        missing.unlink()
+        missing.parent.rmdir()
+
+        self.select_tab(3)
+        export_list = app.dashboard.export_list
+        self.click(export_list.viewport(), export_list.visualItemRect(export_list.item(0)).center())
+        with patch("snaploom.app.QDesktopServices.openUrl") as open_url:
+            self.click(self.button(app.dashboard, "Open folder", "打开所在文件夹"))
+        open_url.assert_not_called()
+        self.assertIn(str(missing.parent), app.dashboard.status.text())
+        self.assertEqual(export_list.count(), 2)
+        history = app.workspace.history()
+        self.assertEqual(len(history), 2)
+
+        clear = self.button(app.dashboard, "Clear records…", "清空记录…")
+        with patch.object(QMessageBox, "question", side_effect=[QMessageBox.StandardButton.No,
+                                                                QMessageBox.StandardButton.Yes]) as confirm:
+            self.click(clear)
+            self.assertEqual(export_list.count(), 2)
+            self.click(clear)
+        self.assertEqual(confirm.call_count, 2)
+        self.assertEqual(export_list.count(), 0)
+        self.assertFalse(app.dashboard.save_location_button.isVisible())
+        self.assertFalse(app.tray_save_location.isVisible())
+        self.assertFalse(clear.isEnabled())
+        self.assertFalse(self.button(app.dashboard, "Open folder", "打开所在文件夹").isEnabled())
+        self.assertFalse(self.button(app.dashboard, "Copy file path", "复制文件路径").isEnabled())
+        self.assertEqual(app.workspace.history(), history)
+        self.assertEqual(QImage(str(retained)).size(), self.selection.size())
+
+        self.stop_application()
+        self.start_application()
+        app = self.application
+        self.select_tab(3)
+        self.assertEqual(app.dashboard.export_list.count(), 0)
+        self.assertFalse(app.dashboard.save_location_button.isVisible())
+        self.assertEqual(app.workspace.history(), history)
 
     def test_copy_file_shows_save_as_dialog_and_copies_the_file_chosen_by_keyboard(self):
         app = self.application

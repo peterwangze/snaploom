@@ -1,4 +1,4 @@
-"""Local preferences, screenshot history and pinned image state."""
+"""Local preferences, screenshot history, export destinations and pinned image state."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from pathlib import Path
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRect, QSaveFile, QStandardPaths
 from PySide6.QtGui import QImage, QImageWriter
 
+
+RECENT_EXPORT_LIMIT = 50
 
 DEFAULTS = {
     "history_limit": 50,
@@ -105,6 +107,9 @@ class Workspace:
             CREATE TABLE IF NOT EXISTS pins (
                 id INTEGER PRIMARY KEY, image BLOB NOT NULL, state TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS recent_exports (
+                id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, created REAL NOT NULL
+            );
         """)
 
     def get(self, key):
@@ -167,6 +172,26 @@ class Workspace:
 
     def regions(self) -> list[QRect]:
         return [QRect(*json.loads(row[2])) for row in self.history() if row[2] != "[0, 0, 0, 0]"]
+
+    def remember_export(self, path: Path) -> None:
+        destination = str(path.expanduser().resolve())
+        with self.db:
+            # Reinsert repeated paths so recency follows write order even if the clock changes.
+            self.db.execute("DELETE FROM recent_exports WHERE path = ?", (destination,))
+            self.db.execute("INSERT INTO recent_exports(path, created) VALUES (?, ?)", (destination, time.time()))
+            self.db.execute(
+                "DELETE FROM recent_exports WHERE id IN (SELECT id FROM recent_exports ORDER BY id DESC LIMIT -1 OFFSET ?)",
+                (RECENT_EXPORT_LIMIT,),
+            )
+
+    def recent_exports(self) -> list[tuple[Path, float]]:
+        rows = self.db.execute("SELECT path, created FROM recent_exports ORDER BY id DESC")
+        return [(Path(path), created) for path, created in rows]
+
+    def clear_exports(self) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM recent_exports")
+        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def add_pin(self, image, state):
         with self.db:

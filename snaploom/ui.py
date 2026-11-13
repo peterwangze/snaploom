@@ -32,7 +32,7 @@ EDITOR_ACTIONS = {
 
 
 class WorkspaceList(QListWidget):
-    open_requested = Signal(int)
+    open_requested = Signal(object)
     delete_requested = Signal()
 
     def __init__(self):
@@ -61,6 +61,7 @@ class Dashboard(QWidget):
     action = Signal(str)
     history_action = Signal(str, int)
     pin_action = Signal(str, int)
+    export_action = Signal(str, str)
     pin_delete_requested = Signal(list)
     files_dropped = Signal(list)
     closing = Signal()
@@ -110,13 +111,15 @@ class Dashboard(QWidget):
         self.pin_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.tabs.addTab(history_page, self.tr("History", "历史"))
         self.tabs.addTab(pins_page, self.tr("Pins", "贴图"))
+        self.exports_page = self.saved_files_page()
+        self.tabs.addTab(self.exports_page, self.tr("Saved files", "已保存文件"))
         bottom = QHBoxLayout()
         self.status = QLabel(self.tr("Ready", "就绪"))
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         self.status.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         bottom.addWidget(self.status)
-        self.save_location_button = QPushButton(self.tr("Open save location", "打开保存位置"))
+        self.save_location_button = QPushButton(self.tr("Open last save location", "打开最近保存位置"))
         self.save_location_button.clicked.connect(lambda: self.action.emit("open-save-location"))
         self.save_location_button.hide()
         bottom.addWidget(self.save_location_button)
@@ -141,6 +144,53 @@ class Dashboard(QWidget):
             QTabWidget::pane { top: -1px; }
             QListWidget::item { padding: 7px; }
         """)
+
+    def saved_files_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self.exports_empty = QLabel(self.tr("Images you save will appear here.", "保存过的图片会显示在这里。"))
+        layout.addWidget(self.exports_empty)
+        self.export_list = WorkspaceList()
+        self.export_list.setAccessibleName(self.tr("Saved files", "已保存文件"))
+        self.export_list.open_requested.connect(lambda path: self.export_action.emit("open", path))
+        layout.addWidget(self.export_list, 1)
+        controls = QHBoxLayout()
+        for action, english, chinese in (
+            ("open", "Open folder", "打开所在文件夹"),
+            ("copy", "Copy file path", "复制文件路径"),
+        ):
+            button = QPushButton(self.tr(english, chinese))
+            button.setEnabled(False)
+            self.export_list.itemSelectionChanged.connect(
+                lambda button=button: button.setEnabled(bool(self.export_list.selectedItems()))
+            )
+            button.clicked.connect(lambda checked=False, action=action: self.export_action.emit(
+                action, self.export_list.selectedItems()[0].data(Qt.ItemDataRole.UserRole)
+            ))
+            controls.addWidget(button)
+        controls.addStretch()
+        self.clear_exports_button = QPushButton(self.tr("Clear records…", "清空记录…"))
+        self.clear_exports_button.clicked.connect(lambda: self.action.emit("clear-saved-files"))
+        controls.addWidget(self.clear_exports_button)
+        layout.addLayout(controls)
+        return page
+
+    def update_saved_files(self, rows):
+        selected = self.export_list.selectedItems()
+        selected_path = selected[0].data(Qt.ItemDataRole.UserRole) if selected else None
+        self.export_list.clear()
+        for path, timestamp in rows:
+            stamp = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            item = QListWidgetItem(f"{path.name}    ·    {stamp}\n{path.parent}")
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            item.setToolTip(str(path))
+            self.export_list.addItem(item)
+            if str(path) == selected_path:
+                self.export_list.setCurrentItem(item)
+        if rows and not self.export_list.selectedItems():
+            self.export_list.setCurrentRow(0)
+        self.exports_empty.setVisible(not rows)
+        self.clear_exports_button.setEnabled(bool(rows))
 
     def home(self):
         page = QWidget()
@@ -346,7 +396,7 @@ class Preferences(QDialog):
             form.addRow(box)
             self.fields[key] = box
         for key, en, zh, minimum, maximum in (
-            ("history_limit", "History limit (0 clears and disables)", "历史条数上限（0 清空并关闭）", 0, 1000),
+            ("history_limit", "Screenshot history limit (0 clears and disables)", "截图历史条数上限（0 清空并关闭）", 0, 1000),
             ("default_pin_opacity", "Default pin opacity (%)", "贴图默认不透明度 (%)", 10, 100),
         ):
             spin = QSpinBox()

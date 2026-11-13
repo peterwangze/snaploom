@@ -561,6 +561,8 @@ class DashboardEntryPointTests(unittest.TestCase):
             self.assertTrue(editor.isVisible())
             self.assertEqual(editor.selected_geometry(), desktop.rect())
             self.assertEqual(self.app.workspace.history(), [])
+            [(saved_path, _)] = self.app.workspace.recent_exports()
+            self.assertEqual(QImage(str(saved_path)).size(), desktop.size())
             self.assertEqual(warning.call_args.args[-1], "Viewer unavailable")
             self.click_capture_menu_item(editor, "Inspect exported image", "Inspect exported image")
 
@@ -788,6 +790,7 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.assertEqual(self.qt.clipboard().image().pixelColor(5, 5), QColor("#386ef2"))
         self.assertEqual(len(self.app.workspace.history()), 1)
         self.assertIn(self.app.tr("Automatic save failed.", "自动保存失败。"), self.app.dashboard.status.text())
+        self.assertEqual(self.app.workspace.recent_exports(), [])
 
         editor = self.open_capture("All displays", "所有屏幕", desktop)
         target = self.folder / "manual.png"
@@ -796,6 +799,7 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.assertEqual(Path(choose.call_args.args[2]).parent, self.folder)
         self.assertEqual(QImage(str(target)).pixelColor(5, 5), QColor("#386ef2"))
         self.assertIsNone(self.app.editor)
+        self.assertEqual([path for path, _ in self.app.workspace.recent_exports()], [target])
 
     def test_scrolling_save_cancel_and_failure_keep_stitched_frames_and_pins_hidden(self):
         import numpy as np

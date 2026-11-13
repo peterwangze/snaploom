@@ -6,6 +6,7 @@ import os
 import plistlib
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,7 @@ class Application:
         self.dashboard.action.connect(self.dashboard_action)
         self.dashboard.history_action.connect(self.history_action)
         self.dashboard.pin_action.connect(self.pin_action)
+        self.dashboard.export_action.connect(self.saved_file_action)
         self.dashboard.pin_delete_requested.connect(self.request_pin_delete)
         self.dashboard.files_dropped.connect(self.open_files)
         self.dashboard.closing.connect(self.close_dashboard)
@@ -95,6 +97,7 @@ class Application:
         self.tray_menu = QMenu()
         self.tray.setContextMenu(self.tray_menu)
         self.rebuild_tray()
+        self.refresh_saved_files()
         if not testing:
             self.tray.show()
             self.configure_hotkeys()
@@ -151,9 +154,10 @@ class Application:
         ):
             self.tray_menu.addAction(self.tr(en, zh), lambda checked=False, name=action: self.action(name))
         self.tray_save_location = self.tray_menu.addAction(
-            self.tr("Open save location", "打开保存位置"), self.open_save_location,
+            self.tr("Open last save location", "打开最近保存位置"), self.open_save_location,
         )
         self.tray_save_location.setVisible(self.last_saved_file is not None)
+        self.tray_menu.addAction(self.tr("Saved files", "已保存文件"), lambda: self.action("saved-files"))
         self.tray_menu.addSeparator()
         groups = self.tray_menu.addMenu(self.tr("Pin groups", "贴图分组"))
         for name in self.groups():
@@ -248,6 +252,10 @@ class Application:
             self.open_files(files)
         elif action == "open-save-location":
             self.open_save_location()
+        elif action == "saved-files":
+            self.show_dashboard(self.dashboard.tabs.indexOf(self.dashboard.exports_page))
+        elif action == "clear-saved-files":
+            self.clear_saved_files()
         elif action == "toggle_pins":
             self.toggle_pins()
         elif action == "click_through":
@@ -621,6 +629,7 @@ class Application:
 
     def custom_output(self, name, image, rect):
         config = self.workspace.get("custom_commands").get(name)
+        path = None
         try:
             if not config:
                 raise ValueError(self.tr("This output command is unavailable.", "此输出命令不可用。"))
@@ -631,6 +640,8 @@ class Application:
             argv = [part.strip('"').replace("{image}", str(path)) for part in tokens]
             subprocess.Popen(argv, shell=False, **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
         except (OSError, ValueError) as error:
+            if path is not None:
+                self.report_saved_file(path, silent=True)
             if self.editor is not None:
                 self.status(str(error))
                 QMessageBox.warning(self.editor, self.tr("Output could not be completed", "无法完成输出"), str(error))
@@ -773,22 +784,63 @@ class Application:
             done(code=0, text=text)
 
     def report_saved_file(self, path, *, copied_file=False, silent=False):
-        self.last_saved_file = Path(path)
-        self.dashboard.save_location_button.setToolTip(str(path))
-        self.dashboard.save_location_button.show()
-        self.tray_save_location.setVisible(True)
+        path = Path(path)
+        try:
+            self.workspace.remember_export(path)
+            self.refresh_saved_files()
+        except (sqlite3.Error, OSError, RuntimeError):
+            self.update_last_saved_file(path)
+            if not silent:
+                self.notify(self.tr(f"Saved to {path}. Could not update saved files.",
+                                    f"已保存至 {path}。无法更新保存记录。"), error=True)
+            return
         if not silent:
             if copied_file:
                 self.notify(self.tr(f"File copied to clipboard. Saved to {path}", f"文件已复制到剪贴板。保存位置为 {path}"))
             else:
                 self.notify(self.tr(f"Saved to {path}", f"已保存至 {path}"))
 
+    def refresh_saved_files(self):
+        rows = self.workspace.recent_exports()
+        self.dashboard.update_saved_files(rows)
+        self.update_last_saved_file(rows[0][0] if rows else None)
+
+    def update_last_saved_file(self, path):
+        self.last_saved_file = path
+        self.dashboard.save_location_button.setToolTip(str(path) if path is not None else "")
+        self.dashboard.save_location_button.setVisible(path is not None)
+        self.tray_save_location.setVisible(path is not None)
+
     def open_save_location(self):
-        if self.last_saved_file is None:
+        if self.last_saved_file is not None:
+            self.saved_file_action("open", str(self.last_saved_file))
+
+    def saved_file_action(self, action, path):
+        if action == "copy":
+            self.qt.clipboard().setText(path)
+            self.status(self.tr("File path copied", "已复制文件路径"))
             return
-        folder = self.last_saved_file.parent
-        if not folder.is_dir() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
-            self.notify(self.tr(f"Could not open the save folder {folder}", f"无法打开保存位置 {folder}"), error=True)
+        folder = Path(path).parent
+        try:
+            if folder.is_dir() and QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+                return
+        except OSError:
+            pass
+        self.notify(self.tr(f"Could not open the save folder {folder}", f"无法打开保存位置 {folder}"), error=True)
+
+    def clear_saved_files(self):
+        answer = QMessageBox.question(
+            self.dashboard, self.tr("Clear saved file records", "清空保存记录"),
+            self.tr("Clear the list of saved files? The images will stay in their folders.",
+                    "要清空保存记录吗？已保存的图片会保留在原来的文件夹中。"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            try:
+                self.workspace.clear_exports()
+                self.refresh_saved_files()
+            except sqlite3.Error:
+                self.notify(self.tr("Could not clear the saved file records.", "无法清空保存记录。"), error=True)
 
     def _record_output(self, image, rect, action, *, already_saved):
         if not rect.isValid():

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication
 from snaploom.app import Application
 from snaploom.hotkeys import parse
 from snaploom.imaging import pixels, stitch_images
-from snaploom.storage import Workspace, save_image
+from snaploom.storage import RECENT_EXPORT_LIMIT, Workspace, save_image
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -64,6 +64,26 @@ class WorkspaceTests(unittest.TestCase):
                 self.assertEqual(list(restored.workspace.pins()), [])
             finally:
                 restored.shutdown()
+
+    def test_saved_paths_survive_restart_and_keep_latest_unique_destinations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            paths = [root / f"image {index}.png" for index in range(RECENT_EXPORT_LIMIT + 1)]
+            workspace = Workspace(root)
+            try:
+                workspace.set("history_limit", 0)
+                for path in paths:
+                    workspace.remember_export(path)
+                workspace.remember_export(paths[1])
+                self.assertEqual(workspace.history(), [])
+            finally:
+                workspace.close()
+            reopened = Workspace(root)
+            try:
+                expected = [paths[1], *reversed(paths[2:])]
+                self.assertEqual([path for path, _ in reopened.recent_exports()], expected)
+            finally:
+                reopened.close()
 
     def test_atomic_export(self):
         with tempfile.TemporaryDirectory() as directory:
