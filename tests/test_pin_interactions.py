@@ -91,7 +91,17 @@ class PinInteractionFixture(unittest.TestCase):
         return menu
 
     def choose_tray_item(self, en, zh):
-        self.click_menu_item(self.show_tray_menu(), en, zh)
+        menu = self.show_tray_menu()
+        label = self.application.tr(en, zh)
+        action = next(action for action in menu.actions() if action.text() == label)
+        self.assertTrue(menu.isVisible() and action.isVisible() and action.isEnabled())
+        for _ in menu.actions():
+            if menu.activeAction() is action:
+                break
+            QTest.keyClick(menu.windowHandle(), Qt.Key.Key_Down)
+        self.assertIs(menu.activeAction(), action)
+        QTest.keyClick(menu.windowHandle(), Qt.Key.Key_Return)
+        self.qt.processEvents()
 
     def show_tray_menu(self):
         tray = self.application.tray_menu
