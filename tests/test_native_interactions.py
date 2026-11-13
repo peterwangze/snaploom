@@ -20,6 +20,107 @@ from snaploom.hotkeys import LABELS, Hotkeys
 
 @unittest.skipUnless(os.environ.get("SNAPLOOM_TEST_DESKTOP") == "1", "needs a live test desktop")
 class DesktopSelectionTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "requires the native Windows image clipboard")
+    def test_copied_images_expose_registered_windows_png_to_another_process(self):
+        from snaploom.app import Application
+
+        qt = QApplication.instance() or QApplication([])
+        if qt.platformName() != "windows":
+            self.skipTest("requires the native Windows clipboard")
+
+        reader = """
+import ctypes as C
+from ctypes import wintypes as W
+from io import BytesIO
+import json
+import time
+
+from PIL import Image
+
+user = C.WinDLL("user32", use_last_error=True)
+kernel = C.WinDLL("kernel32", use_last_error=True)
+user.OpenClipboard.argtypes = (W.HWND,)
+user.RegisterClipboardFormatW.argtypes = (W.LPCWSTR,)
+user.RegisterClipboardFormatW.restype = W.UINT
+user.GetClipboardData.argtypes = (W.UINT,)
+user.GetClipboardData.restype = W.HGLOBAL
+user.IsClipboardFormatAvailable.argtypes = (W.UINT,)
+kernel.GlobalLock.argtypes = (W.HGLOBAL,)
+kernel.GlobalLock.restype = C.c_void_p
+kernel.GlobalSize.argtypes = (W.HGLOBAL,)
+kernel.GlobalSize.restype = C.c_size_t
+kernel.GlobalUnlock.argtypes = (W.HGLOBAL,)
+
+png = user.RegisterClipboardFormatW("PNG")
+if not png:
+    raise C.WinError(C.get_last_error())
+for _ in range(50):
+    if user.OpenClipboard(None):
+        break
+    time.sleep(0.02)
+else:
+    raise C.WinError(C.get_last_error())
+try:
+    # Use the registered format exactly as native clipboard readers do.
+    handle = user.GetClipboardData(png)
+    if not handle:
+        raise RuntimeError("No data in the registered Windows PNG clipboard format")
+    pointer = kernel.GlobalLock(handle)
+    if not pointer:
+        raise C.WinError(C.get_last_error())
+    try:
+        payload = C.string_at(pointer, kernel.GlobalSize(handle))
+    finally:
+        kernel.GlobalUnlock(handle)
+    has_dib = bool(user.IsClipboardFormatAvailable(8))  # CF_DIB
+finally:
+    user.CloseClipboard()
+
+with Image.open(BytesIO(payload), formats=["PNG"]) as source:
+    image = source.convert("RGBA")
+    print(json.dumps({"size": image.size, "pixel": image.getpixel((2, 3)), "has_dib": has_dib}))
+"""
+        with TemporaryDirectory() as directory:
+            app = Application(qt, Path(directory), testing=True)
+            clipboard = qt.clipboard()
+            copied = False
+            try:
+                for format_, color in (
+                    (QImage.Format.Format_RGB32, QColor(35, 88, 159)),
+                    (QImage.Format.Format_ARGB32, QColor(35, 88, 159, 117)),
+                ):
+                    with self.subTest(image_format=format_):
+                        image = QImage(16, 12, format_)
+                        image.fill(QColor("white"))
+                        image.setPixelColor(2, 3, color)
+                        app.output(image, "copy", silent=True, record=False)
+                        copied = True
+                        process = QProcess()
+                        try:
+                            process.start(sys.executable, ["-c", reader])
+                            self.assertTrue(process.waitForStarted(5000), process.errorString())
+                            deadline = monotonic() + 10
+                            while process.state() != QProcess.ProcessState.NotRunning and monotonic() < deadline:
+                                QTest.qWait(20)  # Windows may request the data from the owning Qt process.
+                            self.assertEqual(process.state(), QProcess.ProcessState.NotRunning, "Clipboard reader timed out")
+                            stderr = bytes(process.readAllStandardError()).decode("utf-8", errors="replace")
+                            self.assertEqual(process.exitStatus(), QProcess.ExitStatus.NormalExit, stderr)
+                            self.assertEqual(process.exitCode(), 0, stderr)
+                            data = json.loads(bytes(process.readAllStandardOutput()))
+                            self.assertEqual(data["size"], [image.width(), image.height()])
+                            self.assertEqual(data["pixel"], list(color.getRgb()))
+                            self.assertTrue(data["has_dib"])
+                        finally:
+                            if process.state() != QProcess.ProcessState.NotRunning:
+                                process.kill()
+                                process.waitForFinished(2000)
+            finally:
+                if copied and clipboard.ownsClipboard():
+                    clipboard.clear()
+                app.dashboard.deleteLater()
+                app.shutdown()
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
     @unittest.skipUnless(sys.platform == "linux", "exercises Linux file clipboard interoperability")
     def test_copy_file_publishes_both_clipboard_formats_to_another_process(self):
         from snaploom.app import Application

@@ -128,6 +128,10 @@ Windows 已通过原生保存对话框验证文件名输入、JPEG 写入和生�
 - 默认复制和保存图片只更新工作台状态栏，验证图片像素和文件正常输出。启用「设置 → 输出 → 显示操作成功通知」后，核对应用向系统托盘发送的通知。
 - 核对操作失败、需要补充剪贴板内容和命令行静默输出。设置页测试覆盖开关保存与重启后的恢复。
 
+## 1.0.16 Windows 图像粘贴
+
+- Windows 普通「复制」同时提供标准位图和名为 `PNG` 的原生剪贴板格式。使用独立进程从 Windows 剪贴板读取 PNG，验证普通截图与透明图片的尺寸、颜色和透明度。该格式是 Codex CLI 的 Windows 剪贴板读取路径优先读取的图像格式。[arboard 读取实现](https://github.com/1Password/arboard/blob/v3.6.1/src/platform/windows.rs#L575-L592)
+
 ## 发布包的环境边界
 
 - Windows x64 离线安装通过 Inno Setup，提供安装和免安装两种形式。当前包无 Authenticode 签名。

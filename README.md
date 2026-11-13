@@ -4,25 +4,25 @@
 
 用 Snaploom 把问题截图发给同事、把示例悬浮在正在操作的窗口旁，或从屏幕上提取可编辑的文字。支持 Windows、macOS 和 Linux，安装包自带运行环境和中英文 OCR 模型。
 
-## 下载 v1.0.15 离线包
+## 下载 v1.0.16 离线包
 
 ### Windows
 
-- **x64（Windows 10 / 11）** · [安装版（EXE）](https://github.com/peterwangze/snaploom/releases/download/v1.0.15/Snaploom-1.0.15-windows-x64-setup.exe) · [免安装版（ZIP）](https://github.com/peterwangze/snaploom/releases/download/v1.0.15/Snaploom-1.0.15-windows-x64-portable.zip)
+- **x64（Windows 10 / 11）** · [安装版（EXE）](https://github.com/peterwangze/snaploom/releases/download/v1.0.16/Snaploom-1.0.16-windows-x64-setup.exe) · [免安装版（ZIP）](https://github.com/peterwangze/snaploom/releases/download/v1.0.16/Snaploom-1.0.16-windows-x64-portable.zip)
 
 ### macOS 13 及以上
 
-- **Apple Silicon（ARM64）** · [安装版（DMG）](https://github.com/peterwangze/snaploom/releases/download/v1.0.15/Snaploom-1.0.15-macos-arm64.dmg)
-- **Intel（x64）** · [安装版（DMG）](https://github.com/peterwangze/snaploom/releases/download/v1.0.15/Snaploom-1.0.15-macos-x64.dmg)
+- **Apple Silicon（ARM64）** · [安装版（DMG）](https://github.com/peterwangze/snaploom/releases/download/v1.0.16/Snaploom-1.0.16-macos-arm64.dmg)
+- **Intel（x64）** · [安装版（DMG）](https://github.com/peterwangze/snaploom/releases/download/v1.0.16/Snaploom-1.0.16-macos-x64.dmg)
 
 两种架构均通过 DMG 分发。打开后可将 Snaploom 拖入「应用程序」或所需位置。
 
 ### Linux
 
-- **x64（glibc 2.35+）** · [安装版（RUN）](https://github.com/peterwangze/snaploom/releases/download/v1.0.15/Snaploom-1.0.15-linux-x64-setup.run) · [免安装版（TAR.GZ）](https://github.com/peterwangze/snaploom/releases/download/v1.0.15/Snaploom-1.0.15-linux-x64.tar.gz)
-- **ARM64（glibc 2.39+）** · [安装版（RUN）](https://github.com/peterwangze/snaploom/releases/download/v1.0.15/Snaploom-1.0.15-linux-arm64-setup.run) · [免安装版（TAR.GZ）](https://github.com/peterwangze/snaploom/releases/download/v1.0.15/Snaploom-1.0.15-linux-arm64.tar.gz)
+- **x64（glibc 2.35+）** · [安装版（RUN）](https://github.com/peterwangze/snaploom/releases/download/v1.0.16/Snaploom-1.0.16-linux-x64-setup.run) · [免安装版（TAR.GZ）](https://github.com/peterwangze/snaploom/releases/download/v1.0.16/Snaploom-1.0.16-linux-x64.tar.gz)
+- **ARM64（glibc 2.39+）** · [安装版（RUN）](https://github.com/peterwangze/snaploom/releases/download/v1.0.16/Snaploom-1.0.16-linux-arm64-setup.run) · [免安装版（TAR.GZ）](https://github.com/peterwangze/snaploom/releases/download/v1.0.16/Snaploom-1.0.16-linux-arm64.tar.gz)
 
-[安装说明](#离线安装) · [SHA-256 校验文件](https://github.com/peterwangze/snaploom/releases/download/v1.0.15/SHA256SUMS.txt) · [历史版本](https://github.com/peterwangze/snaploom/releases)
+[安装说明](#离线安装) · [SHA-256 校验文件](https://github.com/peterwangze/snaploom/releases/download/v1.0.16/SHA256SUMS.txt) · [历史版本](https://github.com/peterwangze/snaploom/releases)
 
 ![Snaploom 的截图编辑器，选区中有编号和箭头，工具栏提供复制、贴图和保存。](docs/images/capture-editor.png)
 
@@ -36,7 +36,7 @@
 
 ### 按用途复制或保存
 
-- **直接贴进聊天或文档。** 点「复制」，剪贴板里是图像。
+- **直接贴进聊天、文档或终端输入框。** 点「复制」，剪贴板里是图像。Windows 还提供终端应用可读取的原生 PNG 格式。
 - **作为文件发送。** 点「更多 → 另存为并复制文件…」，选好文件名、目录和格式后，就能将保存好的文件粘贴到支持文件粘贴的应用。
 - **保存后随时找回。** 点「另存为…」选择位置，或点「更多 → 快速保存」写入预设目录。工作台和托盘的「打开最近保存位置」一键打开最后一次保存的目录，重启后也能用。
 - **查找更早的文件。** 在工作台或托盘打开「已保存文件」，按时间查看最近 50 个文件路径。选中文件后可以打开所在文件夹或复制完整路径。清空记录只会移除列表条目，图片仍保存在原处。
@@ -65,9 +65,9 @@
 
 - **Windows** 运行 EXE 安装，或解压 ZIP 后运行 `Snaploom.exe`。升级前请先完成或取消正在进行的截图，再从系统托盘退出 Snaploom。安装包未签名。
 - **macOS** 打开对应架构的 DMG 后拖出 Snaploom。应用使用临时签名，尚未公证，截图需要屏幕录制权限。
-- **Linux** 在普通用户的终端执行 `sh Snaploom-1.0.15-linux-架构-setup.run` 安装，或解压 TAR.GZ 后运行 `Snaploom/Snaploom`。需要图形桌面及系统图形库。Wayland 上的截图和全局快捷键取决于系统门户。
+- **Linux** 在普通用户的终端执行 `sh Snaploom-1.0.16-linux-架构-setup.run` 安装，或解压 TAR.GZ 后运行 `Snaploom/Snaploom`。需要图形桌面及系统图形库。Wayland 上的截图和全局快捷键取决于系统门户。
 
-[首次启动说明](https://github.com/peterwangze/snaploom/releases/tag/v1.0.15) · [平台兼容性与验收记录](docs/release-verification.md)
+[首次启动说明](https://github.com/peterwangze/snaploom/releases/tag/v1.0.16) · [平台兼容性与验收记录](docs/release-verification.md)
 
 ## 进阶用法
 
