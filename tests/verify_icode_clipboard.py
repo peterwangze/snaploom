@@ -24,10 +24,14 @@ from PIL import Image, ImageGrab
 from textual.app import App, ComposeResult
 from textual.events import Paste
 
+from chrys.app.tui.theme import TuiVariableDefaultsMixin
 from chrys.app.tui.widgets.chrome.input_bar import InputBar, _ChatTextArea
+from chrys.foundation.patches.textual_win_sleep import apply_runtime_patch
+
+apply_runtime_patch()
 
 
-class ComposerApp(App):
+class ComposerApp(TuiVariableDefaultsMixin, App):
     def compose(self) -> ComposeResult:
         yield InputBar()
 
@@ -47,9 +51,9 @@ async def paste_into_composer(attachment_directory: Path, shortcut: str, source_
         else:
             await pilot.press(shortcut)
         await pilot.pause()
-        assert input_bar.value == "[Image #1] ", (shortcut, input_bar.value)
         entry = input_bar.draft().references.get("image", 1)
-        assert entry is not None, shortcut
+        assert entry is not None, (shortcut, input_bar.value)
+        assert input_bar.value == f"{entry.label} ", (shortcut, input_bar.value, entry.label)
         saved = Path(entry.content)
         assert saved.is_file(), saved
         if source_file is None:
