@@ -143,7 +143,7 @@ with Image.open(BytesIO(payload), formats=["PNG"]) as source:
                                 target, = folder.glob("*.png")
                                 self.assertEqual([Path(name) for name in data["files"]], [target])
                                 self.assertEqual(data["text"], str(target))
-                                self.assertEqual(QImage(str(target)).pixelColor(2, 3), image.pixelColor(2, 3))
+                                self.assertEqual(list(QImage(str(target)).pixelColor(2, 3).getRgb()), data["pixel"])
                             else:
                                 self.assertEqual(data["grabbed_format"], "PNG")
                                 self.assertEqual(data["grabbed_size"], data["size"])
