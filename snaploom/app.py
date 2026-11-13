@@ -394,7 +394,7 @@ class Application:
                 "color_format": self.workspace.get("color_format").lower(),
                 "corner_radius": radius,
                 "custom_outputs": {name: name for name in self.workspace.get("custom_commands")},
-                "default_action": "output" if requested_output else "copy",
+                "default_action": "output" if requested_output else "save-copy",
                 "requested_outputs": options.get("output", ()),
                 "aspect_ratio": (tuple(options["size"]) if options.get("size") and options.get("keep_aspect_ratio") else None),
                 "detect_elements": detect_elements if suggest_windows else None,
@@ -539,7 +539,7 @@ class Application:
             except (ValueError, RuntimeError) as error:
                 self.notify(str(error), error=True)
         if self.editor is not None and not recognition and not outputs:
-            if action in {"save", "quick-save", "copy-file", "print"}:
+            if action in {"save", "quick-save", "copy-file", "save-copy", "print"}:
                 self._complete_editor_output(action, image, rect)
                 return
             if action in {"ocr", "barcode"}:
@@ -590,7 +590,7 @@ class Application:
             done = context.get("done")
             try:
                 history_action = "saved" if action == "save" else action
-                self._record_output(image, rect, history_action, already_saved=action in {"save", "quick-save", "copy-file"})
+                self._record_output(image, rect, history_action, already_saved=bool(text))
             except (OSError, RuntimeError, ValueError) as error:
                 self.failure(str(error), done)
                 return
@@ -663,8 +663,25 @@ class Application:
         if done:
             done(code=1, error=message)
 
-    def copy_image(self, image):
+    @staticmethod
+    def add_clipboard_file(mime, path):
+        url = QUrl.fromLocalFile(str(path))
+        mime.setUrls([url])
+        if sys.platform == "win32":
+            # Windows Terminal can forward the path to a TUI as pasted text.
+            mime.setText(str(path))
+        elif sys.platform.startswith("linux"):
+            mime.setData("x-special/gnome-copied-files", QByteArray(b"copy\n") + url.toEncoded())
+
+    def copy_image(self, image, *, saved_path=None):
         mime = QMimeData()
+        if saved_path is not None:
+            self.add_clipboard_file(mime, saved_path)
+            # Lossy formats can change the pixels; paste what was actually saved.
+            if saved_path.suffix.lower() != ".png":
+                saved_image = QImage(str(saved_path))
+                if not saved_image.isNull():
+                    image = saved_image
         png = QByteArray(png_bytes(image))
         if sys.platform == "win32":
             # Clipboard readers such as Pillow try formats in the order we publish them.
@@ -746,14 +763,7 @@ class Application:
                     if done:
                         done(code=1, error="Save cancelled.")
                     return
-                if action == "copy-file":
-                    url = QUrl.fromLocalFile(str(target))
-                    mime = QMimeData()
-                    mime.setUrls([url])
-                    if sys.platform.startswith("linux"):
-                        mime.setData("x-special/gnome-copied-files", QByteArray(b"copy\n") + url.toEncoded())
-                    self.qt.clipboard().setMimeData(mime)
-            elif action in {"quick-save", "silent"}:
+            elif action in {"quick-save", "silent", "save-copy"}:
                 target = self.quick_save(image)
             elif action == "file":
                 target = save_image(image, target)
@@ -772,9 +782,14 @@ class Application:
                 raise ValueError(f"Unknown output: {action}")
             if target:
                 text = str(target)
-                self.report_saved_file(target, copied_file=action == "copy-file", silent=silent or action == "silent")
-                if action != "copy-file" and self.workspace.get("copy_after_save"):
-                    self.copy_image(image)
+                copied_file = action in {"copy-file", "save-copy"} or self.workspace.get("copy_after_save")
+                if action == "copy-file":
+                    mime = QMimeData()
+                    self.add_clipboard_file(mime, target)
+                    self.qt.clipboard().setMimeData(mime)
+                elif copied_file:
+                    self.copy_image(image, saved_path=target)
+                self.report_saved_file(target, copied_file=copied_file, silent=silent or action == "silent")
             if record:
                 self._record_output(image, rect, action, already_saved=bool(target))
         except (OSError, RuntimeError, ValueError) as error:
@@ -1439,7 +1454,7 @@ class Application:
         buttons = QHBoxLayout()
         add = QPushButton(self.tr("Add next frame", "添加下一帧"))
         save = QPushButton(self.tr("Save As…", "另存为…"))
-        copy = QPushButton(self.tr("Copy", "复制"))
+        copy = QPushButton(self.tr("Save and Copy", "保存并复制"))
         pin = QPushButton(self.tr("Pin", "贴图"))
         cancel = QPushButton(self.tr("Cancel", "取消"))
         cancel.setAccessibleName(self.tr("Cancel scrolling capture", "取消滚动截图"))
@@ -1500,7 +1515,7 @@ class Application:
 
         add.clicked.connect(next_frame)
         save.clicked.connect(lambda: finish("save"))
-        copy.clicked.connect(lambda: finish("copy"))
+        copy.clicked.connect(lambda: finish("save-copy"))
         pin.clicked.connect(lambda: finish("pin"))
         cancel.clicked.connect(dialog.reject)
         dialog.finished.connect(close_scroll)
