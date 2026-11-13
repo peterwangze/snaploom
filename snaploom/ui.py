@@ -455,6 +455,12 @@ class Preferences(QDialog):
         shadow.setChecked(workspace.get("capture_shadow"))
         output_form.addRow(shadow)
         self.fields["capture_shadow"] = shadow
+        notifications = QCheckBox(self.tr("Show success notifications", "显示操作成功通知"))
+        notifications.setToolTip(self.tr("Show a desktop notification after copying or saving an image.",
+                                         "复制或保存图片后显示桌面通知。"))
+        notifications.setChecked(workspace.get("show_success_notifications"))
+        output_form.addRow(notifications)
+        self.fields["show_success_notifications"] = notifications
         provider = QComboBox()
         provider.addItem(self.tr("On this device", "在本机识别"), "local")
         provider.addItem("OCR.space", "ocr-space")

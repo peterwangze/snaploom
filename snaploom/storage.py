@@ -21,6 +21,7 @@ DEFAULTS = {
     "format": "png",
     "auto_save": False,
     "copy_after_save": False,
+    "show_success_notifications": False,
     "include_cursor": False,
     "run_at_login": False,
     "start_hidden": False,

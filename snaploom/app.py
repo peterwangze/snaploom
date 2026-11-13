@@ -119,8 +119,10 @@ class Application:
     def status(self, message):
         self.dashboard.status.setText(message)
 
-    def notify(self, message, error=False):
+    def notify(self, message, error=False, *, success=False):
         self.status(message)
+        if success and not self.workspace.get("show_success_notifications"):
+            return
         if self.tray.isVisible():
             self.tray.showMessage("Snaploom", message, QSystemTrayIcon.MessageIcon.Warning if error
                                   else QSystemTrayIcon.MessageIcon.Information, 3000)
@@ -724,7 +726,7 @@ class Application:
             if action == "copy":
                 self.copy_image(image)
                 if not silent:
-                    self.notify(self.tr("Image copied", "图像已复制"))
+                    self.notify(self.tr("Image copied", "图像已复制"), success=True)
             elif action == "pin":
                 if rect.isValid():
                     image = QImage(image)
@@ -760,7 +762,7 @@ class Application:
                 self.external(shlex.split(target, posix=os.name != "nt"))
                 target = None
             elif action in {"ocr", "ocr-copy", "barcode", "barcode-copy"}:
-                self.start_recognition(image, action, done)
+                self.start_recognition(image, action, done, silent=silent)
                 done = None
             elif action not in {"success", "saved"}:
                 raise ValueError(f"Unknown output: {action}")
@@ -796,9 +798,10 @@ class Application:
             return
         if not silent:
             if copied_file:
-                self.notify(self.tr(f"File copied to clipboard. Saved to {path}", f"文件已复制到剪贴板。保存位置为 {path}"))
+                message = self.tr(f"File copied to clipboard. Saved to {path}", f"文件已复制到剪贴板。保存位置为 {path}")
             else:
-                self.notify(self.tr(f"Saved to {path}", f"已保存至 {path}"))
+                message = self.tr(f"Saved to {path}", f"已保存至 {path}")
+            self.notify(message, success=True)
 
     def refresh_saved_files(self):
         rows = self.workspace.recent_exports()
@@ -1338,7 +1341,7 @@ class Application:
         dialog.show()
         dialog.raise_()
 
-    def start_recognition(self, image, action, done=None, *, result_parent=None):
+    def start_recognition(self, image, action, done=None, *, result_parent=None, silent=False):
         import threading
 
         if self.recognition_jobs:
@@ -1346,7 +1349,7 @@ class Application:
             return
         self.job_id += 1
         job_id = self.job_id
-        self.recognition_jobs[job_id] = action, done, result_parent
+        self.recognition_jobs[job_id] = action, done, result_parent, silent
         self.status(self.tr("Recognizing locally…", "正在离线识别…"))
         image = image.copy()
         provider = self.workspace.get("ocr_provider") if action in {"ocr", "ocr-copy"} else "local"
@@ -1368,7 +1371,7 @@ class Application:
         threading.Thread(target=run, daemon=True).start()
 
     def recognition_finished(self, job_id, text, error):
-        action, done, result_parent = self.recognition_jobs.pop(job_id)
+        action, done, result_parent, silent = self.recognition_jobs.pop(job_id)
         if error or not text:
             message = error or self.tr("No text or code was recognized.", "未识别到文字或条码。")
             if result_parent is not None:
@@ -1380,7 +1383,11 @@ class Application:
             return
         if action in {"ocr-copy", "barcode-copy"}:
             self.qt.clipboard().setText(text)
-            self.notify(self.tr("Recognized text copied", "识别结果已复制"))
+            message = self.tr("Recognized text copied", "识别结果已复制")
+            if silent:
+                self.status(message)
+            else:
+                self.notify(message, success=True)
             return
         if result_parent is None and self.dashboard.isVisible():
             result_parent = self.dashboard

@@ -12,7 +12,7 @@ from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QMessageBox, QPushButton,
-    QSpinBox, QTextEdit, QToolButton,
+    QSpinBox, QSystemTrayIcon, QTextEdit, QToolButton,
 )
 from shiboken6 import isValid
 
@@ -181,6 +181,94 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.assertEqual(editor.selected_geometry(), desktop.rect())
         self.click_button("Copy", "复制", parent=editor.toolbar, widget=QToolButton)
         self.assertEqual(self.qt.clipboard().image().size(), desktop.size())
+
+    def test_copy_and_save_confirm_in_workspace_and_request_popups_only_when_enabled(self):
+        desktop = self.image(360, 260, "#386ef2")
+        information = QSystemTrayIcon.MessageIcon.Information
+        self.assertIs(self.app.workspace.get("show_success_notifications"), False)
+        with (
+            patch.object(self.app.tray, "isVisible", return_value=True),
+            patch.object(self.app.tray, "showMessage") as popup,
+        ):
+            for enabled in (False, True):
+                with self.subTest(notifications=enabled):
+                    if enabled:
+                        self.app.workspace.set("show_success_notifications", True)
+                    editor = self.open_capture("All displays", "所有屏幕", desktop)
+                    self.click_button("Copy", "复制", parent=editor.toolbar, widget=QToolButton)
+                    copied = self.qt.clipboard().image()
+                    self.assertEqual(copied.size(), desktop.size())
+                    self.assertEqual(copied.pixelColor(5, 5), QColor("#386ef2"))
+                    message = self.app.tr("Image copied", "图像已复制")
+                    self.assertEqual(self.app.dashboard.status.text(), message)
+                    if enabled:
+                        popup.assert_called_once_with("Snaploom", message, information, 3000)
+                    else:
+                        popup.assert_not_called()
+                    popup.reset_mock()
+
+                    target = self.folder / f"captured {enabled}.png"
+                    editor = self.open_capture("All displays", "所有屏幕", desktop)
+                    with patch.object(QFileDialog, "getSaveFileName", return_value=(str(target), "PNG (*.png)")):
+                        self.click_button("Save As…", "另存为…", parent=editor.toolbar, widget=QToolButton)
+                    self.assertEqual(QImage(str(target)).pixelColor(5, 5), QColor("#386ef2"))
+                    self.assertEqual(self.app.last_saved_file, target)
+                    message = self.app.dashboard.status.text()
+                    self.assertIn(str(target), message)
+                    if enabled:
+                        popup.assert_called_once_with("Snaploom", message, information, 3000)
+                    else:
+                        popup.assert_not_called()
+                    popup.reset_mock()
+
+    def test_action_required_and_error_still_request_tray_popups(self):
+        desktop = self.image(360, 260, "#386ef2")
+        occupied = self.folder / "not a directory"
+        occupied.touch()
+        target = occupied / "cannot save.png"
+        with (
+            patch.object(self.app.tray, "isVisible", return_value=True),
+            patch.object(self.app.tray, "showMessage") as popup,
+            patch("snaploom.capture.capture_desktop", return_value=Snapshot(desktop, desktop.rect())),
+        ):
+            self.click_button("Pin clipboard content", "悬浮剪贴板内容")
+            message = self.app.tr("Copy an image, text, or color before pinning clipboard content.",
+                                  "请先复制图片、文字或色值，再悬浮剪贴板内容。")
+            self.assertEqual(self.app.dashboard.status.text(), message)
+            popup.assert_called_once_with("Snaploom", message, QSystemTrayIcon.MessageIcon.Information, 3000)
+            self.assertFalse(self.app.pin_windows)
+            popup.reset_mock()
+
+            results = []
+            self.app.command(arguments(["snip", "--full", "--block", "-o", str(target)]),
+                             lambda **result: results.append(result))
+            self.wait_until(lambda: bool(results))
+            result, = results
+            self.assertEqual(result["code"], 1)
+            self.assertIn(occupied.name, result["error"])
+            self.assertEqual(self.app.dashboard.status.text(), result["error"])
+            popup.assert_called_once_with("Snaploom", result["error"], QSystemTrayIcon.MessageIcon.Warning, 3000)
+            self.assertFalse(target.exists())
+
+    def test_silent_cli_still_saves_and_copies_without_a_success_popup_when_enabled(self):
+        desktop = self.image(360, 260, "#386ef2")
+        self.app.workspace.set("show_success_notifications", True)
+        target = self.folder / "silent capture.png"
+        results = []
+        with (
+            patch.object(self.app.tray, "isVisible", return_value=True),
+            patch.object(self.app.tray, "showMessage") as popup,
+            patch("snaploom.capture.capture_desktop", return_value=Snapshot(desktop, desktop.rect())),
+        ):
+            data = arguments(["snip", "--full", "--block", "-o", f"{target};clipboard;silent"])
+            self.app.command(data, lambda **result: results.append(result))
+            self.wait_until(lambda: bool(results))
+        popup.assert_not_called()
+        result, = results
+        self.assertEqual(result["code"], 0)
+        self.assertEqual(Path(result["text"]), target)
+        self.assertEqual(QImage(str(target)).pixelColor(5, 5), QColor("#386ef2"))
+        self.assertEqual(self.qt.clipboard().image().pixelColor(5, 5), QColor("#386ef2"))
 
     def test_current_window_without_an_eligible_foreground_allows_window_selection(self):
         desktop = self.image(800, 520, "#386ef2")

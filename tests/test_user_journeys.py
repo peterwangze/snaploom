@@ -993,7 +993,7 @@ class UserJourneyTests(unittest.TestCase):
         app = self.application
         checkboxes = ("auto_save", "copy_after_save", "include_cursor", "restore_pins", "hide_pins_on_capture",
                       "run_at_login", "start_hidden", "allow_remote_images", "show_grid", "show_magnifier",
-                      "detect_windows", "remember_annotation_styles", "capture_shadow")
+                      "detect_windows", "remember_annotation_styles", "capture_shadow", "show_success_notifications")
         numbers = {"history_limit": 51, "default_pin_opacity": 99, "annotation_width": 4, "rounded_corners": 1}
         dropdowns = {"ocr_provider": "ocr-space", "format": "jpg", "color_format": "RGB",
                      "hot_corner": "top-left", "super_snip": "alt"}
