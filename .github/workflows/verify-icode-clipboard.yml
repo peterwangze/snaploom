@@ -29,4 +29,4 @@ jobs:
       - name: Use iCode to read a Snaploom clipboard image
         env:
           QT_QPA_PLATFORM: windows
-        run: python tests/verify_icode_clipboard.py
+        run: python -c "import runpy; runpy.run_path('tests/verify_icode_clipboard.py', run_name='__main__')"
