@@ -34,6 +34,7 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.folder = Path(directory.name).resolve()
         self.app = Application(self.qt, self.folder, testing=True)
+        self.app.workspace.set("save_folder", str(self.folder / "default screenshots"))
         self.addCleanup(self.close_app)
         self.qt.clipboard().clear()
         self.addCleanup(self.qt.clipboard().clear)
@@ -174,16 +175,20 @@ class DashboardEntryPointTests(unittest.TestCase):
         desktop = self.image(screen.width() + 210, screen.height(), "#386ef2")
         editor = self.open_capture("Current display", "当前屏幕", desktop)
         self.assertEqual(editor.selected_geometry(), screen.intersected(desktop.rect()))
-        self.click_button("Copy", "复制", parent=editor.toolbar, widget=QToolButton)
+        self.click_button("Save and Copy", "保存并复制", parent=editor.toolbar, widget=QToolButton)
         self.assertEqual(self.qt.clipboard().image().size(), screen.size())
 
         editor = self.open_capture("All displays", "所有屏幕", desktop)
         self.assertEqual(editor.selected_geometry(), desktop.rect())
-        self.click_button("Copy", "复制", parent=editor.toolbar, widget=QToolButton)
+        self.click_button("Save and Copy", "保存并复制", parent=editor.toolbar, widget=QToolButton)
         self.assertEqual(self.qt.clipboard().image().size(), desktop.size())
 
     def test_copy_and_save_confirm_in_workspace_and_request_popups_only_when_enabled(self):
         desktop = self.image(360, 260, "#386ef2")
+        save_folder = self.folder / "截图 文件"
+        self.app.workspace.set("save_folder", str(save_folder))
+        self.app.workspace.set("save_pattern", "截图 示例")
+        self.app.workspace.set("auto_save", True)
         information = QSystemTrayIcon.MessageIcon.Information
         self.assertIs(self.app.workspace.get("show_success_notifications"), False)
         with (
@@ -195,12 +200,21 @@ class DashboardEntryPointTests(unittest.TestCase):
                     if enabled:
                         self.app.workspace.set("show_success_notifications", True)
                     editor = self.open_capture("All displays", "所有屏幕", desktop)
-                    self.click_button("Copy", "复制", parent=editor.toolbar, widget=QToolButton)
+                    with patch.object(QFileDialog, "getSaveFileName") as choose:
+                        self.click_button("Save and Copy", "保存并复制", parent=editor.toolbar, widget=QToolButton)
+                    choose.assert_not_called()
                     copied = self.qt.clipboard().image()
                     self.assertEqual(copied.size(), desktop.size())
                     self.assertEqual(copied.pixelColor(5, 5), QColor("#386ef2"))
-                    message = self.app.tr("Image copied", "图像已复制")
-                    self.assertEqual(self.app.dashboard.status.text(), message)
+                    url, = self.qt.clipboard().mimeData().urls()
+                    path = Path(url.toLocalFile())
+                    self.assertEqual(path.parent, save_folder)
+                    self.assertTrue(path.name.startswith("截图 示例"))
+                    self.assertEqual(QImage(str(path)).convertToFormat(copied.format()), copied)
+                    self.assertEqual(len(list(save_folder.glob("*.png"))), 2 if enabled else 1)
+                    self.assertEqual(self.app.last_saved_file, path)
+                    message = self.app.dashboard.status.text()
+                    self.assertIn(str(path), message)
                     if enabled:
                         popup.assert_called_once_with("Snaploom", message, information, 3000)
                     else:
@@ -269,6 +283,7 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.assertEqual(Path(result["text"]), target)
         self.assertEqual(QImage(str(target)).pixelColor(5, 5), QColor("#386ef2"))
         self.assertEqual(self.qt.clipboard().image().pixelColor(5, 5), QColor("#386ef2"))
+        self.assertFalse(self.qt.clipboard().mimeData().hasUrls())
 
     def test_current_window_without_an_eligible_foreground_allows_window_selection(self):
         desktop = self.image(800, 520, "#386ef2")
@@ -444,6 +459,7 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.click_button("Copy", "复制")
         self.assertEqual(self.qt.clipboard().image().size(), region.size())
         self.assertEqual(self.qt.clipboard().image().pixelColor(5, 5), QColor("#386ef2"))
+        self.assertFalse(self.qt.clipboard().mimeData().hasUrls())
         target = self.folder / "history.png"
         with patch("snaploom.app.QFileDialog.getSaveFileName", return_value=(str(target), "PNG (*.png)")):
             self.click_button("Save As…", "另存为…")
@@ -554,6 +570,7 @@ class DashboardEntryPointTests(unittest.TestCase):
         url, = self.qt.clipboard().mimeData().urls()
         self.assertTrue(url.isLocalFile())
         self.assertEqual(Path(url.toLocalFile()), target)
+        self.assertFalse(self.qt.clipboard().mimeData().hasImage())
         self.assertIn(str(target), self.app.dashboard.status.text())
         entry, = self.app.workspace.history()
         self.assertEqual(entry[3], "copy-file")
@@ -567,7 +584,7 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.assertIs(self.app.editor, editor)
         self.assertTrue(editor.isVisible())
         self.assertEqual(self.app.workspace.history(), [])
-        self.click_button("Copy", "复制", parent=editor.toolbar, widget=QToolButton)
+        self.click_button("Save and Copy", "保存并复制", parent=editor.toolbar, widget=QToolButton)
         self.assertIsNone(self.app.editor)
         self.assertEqual(self.qt.clipboard().image().pixelColor(5, 5), QColor("#386ef2"))
 
@@ -575,7 +592,7 @@ class DashboardEntryPointTests(unittest.TestCase):
         desktop = self.image(360, 260, "#386ef2")
         ctrl, shift = Qt.KeyboardModifier.ControlModifier, Qt.KeyboardModifier.ShiftModifier
         cases = (
-            (Qt.Key.Key_C, ctrl, "copy"), (Qt.Key.Key_P, ctrl, "pin"), (Qt.Key.Key_S, ctrl, "saved"),
+            (Qt.Key.Key_C, ctrl, "save-copy"), (Qt.Key.Key_P, ctrl, "pin"), (Qt.Key.Key_S, ctrl, "saved"),
             (Qt.Key.Key_S, ctrl | shift, "quick-save"), (Qt.Key.Key_C, ctrl | shift, "copy-file"),
         )
         self.app.workspace.set("save_folder", str(self.folder))
@@ -585,6 +602,7 @@ class DashboardEntryPointTests(unittest.TestCase):
         with patch.object(QFileDialog, "getSaveFileName", side_effect=choices) as save_dialog:
             for key, modifiers, action in cases:
                 with self.subTest(action=action):
+                    prior_files = set(self.folder.glob("*.png"))
                     self.qt.clipboard().clear()
                     editor = self.open_capture("All displays", "所有屏幕", desktop)
                     editor.activateWindow()
@@ -595,8 +613,12 @@ class DashboardEntryPointTests(unittest.TestCase):
                     self.assertFalse(self.app.capturing)
                     self.assertTrue(self.app.dashboard.isVisible())
                     self.assertEqual(self.app.workspace.history()[0][3], action)
-                    if action == "copy":
+                    if action == "save-copy":
                         result = self.qt.clipboard().image()
+                        url, = self.qt.clipboard().mimeData().urls()
+                        copied_path = Path(url.toLocalFile())
+                        self.assertEqual(copied_path.parent, self.folder)
+                        self.assertEqual(QImage(str(copied_path)).convertToFormat(result.format()), result)
                     elif action == "pin":
                         pin_id, = self.app.pin_windows
                         pin = self.app.pin_windows[pin_id]
@@ -606,7 +628,7 @@ class DashboardEntryPointTests(unittest.TestCase):
                     elif action == "saved":
                         result = QImage(str(target))
                     elif action == "quick-save":
-                        files = set(self.folder.glob("*.png")) - {target}
+                        files = set(self.folder.glob("*.png")) - prior_files
                         path, = files
                         result = QImage(str(path))
                     else:
@@ -687,7 +709,7 @@ class DashboardEntryPointTests(unittest.TestCase):
             self.wait_for_capture()
         editor = self.app.editor
         labels = {button.text() for button in editor.toolbar.findChildren(QToolButton) if button.isVisible()}
-        self.assertNotIn(self.app.tr("Copy", "复制"), labels)
+        self.assertNotIn(self.app.tr("Save and Copy", "保存并复制"), labels)
         self.assertNotIn(self.app.tr("Save As…", "另存为…"), labels)
         with patch.object(self.app, "save_dialog") as save_dialog:
             self.click_button("Confirm requested output", "确认输出", parent=editor.toolbar, widget=QToolButton)
@@ -726,6 +748,21 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.assertEqual(Path(url.toLocalFile()), path)
         entry, = self.app.workspace.history()
         self.assertEqual(entry[3], "copy-file")
+
+    def test_cli_clipboard_output_remains_image_only_without_saving(self):
+        desktop = self.image(360, 260, "#386ef2")
+        results = []
+        data = arguments(["snip", "--full", "--block", "-o", "clipboard"])
+        with patch("snaploom.capture.capture_desktop", return_value=Snapshot(desktop, desktop.rect())):
+            self.app.command(data, lambda **result: results.append(result))
+            self.wait_until(lambda: bool(results))
+
+        result, = results
+        self.assertEqual(result["code"], 0)
+        self.assertEqual(self.qt.clipboard().image(), desktop)
+        self.assertFalse(self.qt.clipboard().mimeData().hasUrls())
+        self.assertEqual(self.app.workspace.recent_exports(), [])
+        self.assertFalse(Path(self.app.workspace.get("save_folder")).exists())
 
     def test_cli_invalid_region_and_failed_write_return_errors_without_later_outputs(self):
         desktop = self.image(360, 260, "#386ef2")
@@ -866,27 +903,61 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.assertEqual(editor.selected_geometry(), first.rect())
         self.assertEqual(editor.export_image().pixelColor(20, 20), QColor("#23a097"))
 
-    def test_failed_automatic_save_keeps_copy_and_history_and_allows_manual_save(self):
+    def test_failed_automatic_save_keeps_pin_and_history(self):
         blocked_folder = self.folder / "existing-file"
         blocked_folder.touch()
         self.app.workspace.set("save_folder", str(blocked_folder))
         self.app.workspace.set("auto_save", True)
         desktop = self.image(800, 520, "#386ef2")
         editor = self.open_capture("All displays", "所有屏幕", desktop)
-        self.click_button("Copy", "复制", parent=editor.toolbar, widget=QToolButton)
+        self.click_button("Pin", "贴图", parent=editor.toolbar, widget=QToolButton)
         self.assertIsNone(self.app.editor)
-        self.assertEqual(self.qt.clipboard().image().pixelColor(5, 5), QColor("#386ef2"))
+        pin, = self.app.pin_windows.values()
+        self.assertEqual(pin.image.pixelColor(5, 5), QColor("#386ef2"))
         self.assertEqual(len(self.app.workspace.history()), 1)
         self.assertIn(self.app.tr("Automatic save failed.", "自动保存失败。"), self.app.dashboard.status.text())
         self.assertEqual(self.app.workspace.recent_exports(), [])
 
+    def test_default_copy_save_failure_keeps_capture_and_allows_save_as_elsewhere(self):
+        blocked_folder = self.folder / "existing-file"
+        blocked_folder.touch()
+        self.app.workspace.set("save_folder", str(blocked_folder))
+        self.app.workspace.set("copy_after_save", True)
+        self.qt.clipboard().setText("Keep the old clipboard")
+        desktop = self.image(800, 520, "#386ef2")
         editor = self.open_capture("All displays", "所有屏幕", desktop)
-        target = self.folder / "manual.png"
+        selection = editor.selected_geometry()
+        QTest.mouseClick(editor.tool_buttons["redact"], Qt.MouseButton.LeftButton)
+        QTest.mousePress(editor, Qt.MouseButton.LeftButton, pos=QPoint(45, 54))
+        QTest.mouseMove(editor, QPoint(85, 90))
+        QTest.mouseRelease(editor, Qt.MouseButton.LeftButton, pos=QPoint(85, 90))
+        annotated_color = editor.export_image().pixelColor(60, 70)
+        self.assertNotEqual(annotated_color, desktop.pixelColor(60, 70))
+        with patch.object(QMessageBox, "warning") as warning:
+            self.click_button("Save and Copy", "保存并复制", parent=editor.toolbar, widget=QToolButton)
+        warning.assert_called_once()
+        self.assertIn(blocked_folder.name, warning.call_args.args[-1])
+        self.assertIs(self.app.editor, editor)
+        self.assertTrue(editor.isVisible())
+        self.assertTrue(self.app.capturing)
+        self.assertEqual(editor.selected_geometry(), selection)
+        self.assertEqual(editor.export_image().pixelColor(60, 70), annotated_color)
+        self.assertEqual(self.qt.clipboard().text(), "Keep the old clipboard")
+        self.assertEqual(self.app.workspace.history(), [])
+        self.assertEqual(self.app.workspace.recent_exports(), [])
+
+        target = self.folder / "alternate location" / "manual.png"
         with patch.object(QFileDialog, "getSaveFileName", return_value=(str(target), "PNG (*.png)")) as choose:
             self.click_button("Save As…", "另存为…", parent=editor.toolbar, widget=QToolButton)
         self.assertEqual(Path(choose.call_args.args[2]).parent, self.folder)
-        self.assertEqual(QImage(str(target)).pixelColor(5, 5), QColor("#386ef2"))
+        saved = QImage(str(target))
+        self.assertEqual(saved.size(), selection.size())
+        self.assertEqual(saved.pixelColor(60, 70), annotated_color)
+        self.assertEqual(self.qt.clipboard().image().convertToFormat(saved.format()), saved)
+        url, = self.qt.clipboard().mimeData().urls()
+        self.assertEqual(Path(url.toLocalFile()), target)
         self.assertIsNone(self.app.editor)
+        self.assertEqual(self.app.workspace.get("save_folder"), str(blocked_folder))
         self.assertEqual([path for path, _ in self.app.workspace.recent_exports()], [target])
 
     def test_scrolling_save_cancel_and_failure_keep_stitched_frames_and_pins_hidden(self):
@@ -1050,7 +1121,7 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.click_at(buttons.button(QDialogButtonBox.StandardButton.Close))
         self.assertTrue(editor.isVisible())
         self.assertEqual(editor.selected_geometry(), desktop.rect())
-        self.click_button("Copy", "复制", parent=editor.toolbar, widget=QToolButton)
+        self.click_button("Save and Copy", "保存并复制", parent=editor.toolbar, widget=QToolButton)
         self.assertEqual(self.qt.clipboard().image().pixelColor(5, 5), QColor("#386ef2"))
         self.assertEqual(len(self.app.workspace.history()), 1)
 

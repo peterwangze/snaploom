@@ -21,18 +21,19 @@ from snaploom.hotkeys import LABELS, Hotkeys
 @unittest.skipUnless(os.environ.get("SNAPLOOM_TEST_DESKTOP") == "1", "needs a live test desktop")
 class DesktopSelectionTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "requires the native Windows image clipboard")
-    def test_copied_images_expose_registered_windows_png_to_another_process(self):
+    def test_windows_copy_exposes_native_image_and_saved_file_formats_to_another_process(self):
         from snaploom.app import Application
 
         qt = QApplication.instance() or QApplication([])
         if qt.platformName() != "windows":
             self.skipTest("requires the native Windows clipboard")
 
-        reader = """
+        reader = r"""
 import ctypes as C
 from ctypes import wintypes as W
 from io import BytesIO
 import json
+import sys
 import time
 
 from PIL import Image, ImageGrab
@@ -51,6 +52,18 @@ kernel.GlobalSize.argtypes = (W.HGLOBAL,)
 kernel.GlobalSize.restype = C.c_size_t
 kernel.GlobalUnlock.argtypes = (W.HGLOBAL,)
 
+def clipboard_bytes(format_):
+    handle = user.GetClipboardData(format_)
+    if not handle:
+        raise RuntimeError(f"No clipboard data in format {format_}")
+    pointer = kernel.GlobalLock(handle)
+    if not pointer:
+        raise C.WinError(C.get_last_error())
+    try:
+        return C.string_at(pointer, kernel.GlobalSize(handle))
+    finally:
+        kernel.GlobalUnlock(handle)
+
 png = user.RegisterClipboardFormatW("PNG")
 if not png:
     raise C.WinError(C.get_last_error())
@@ -62,51 +75,58 @@ else:
     raise C.WinError(C.get_last_error())
 try:
     # Use the registered format exactly as native clipboard readers do.
-    handle = user.GetClipboardData(png)
-    if not handle:
-        raise RuntimeError("No data in the registered Windows PNG clipboard format")
-    pointer = kernel.GlobalLock(handle)
-    if not pointer:
-        raise C.WinError(C.get_last_error())
-    try:
-        payload = C.string_at(pointer, kernel.GlobalSize(handle))
-    finally:
-        kernel.GlobalUnlock(handle)
+    payload = clipboard_bytes(png)
     has_dib = bool(user.IsClipboardFormatAvailable(8))  # CF_DIB
+    path = None
+    if len(sys.argv) > 1:
+        path = clipboard_bytes(13).decode("utf-16-le").split("\0", 1)[0]  # CF_UNICODETEXT
 finally:
     user.CloseClipboard()
 
 with Image.open(BytesIO(payload), formats=["PNG"]) as source:
     image = source.convert("RGBA")
     grabbed = ImageGrab.grabclipboard()
-    if not isinstance(grabbed, Image.Image):
-        raise RuntimeError("Pillow did not read the Windows clipboard as an image")
-    with grabbed:
+    if isinstance(grabbed, list):
         print(json.dumps({
             "size": image.size, "pixel": image.getpixel((2, 3)), "has_dib": has_dib,
-            "grabbed_format": grabbed.format, "grabbed_size": grabbed.size,
-            "grabbed_pixel": grabbed.convert("RGBA").getpixel((2, 3)),
+            "files": grabbed, "text": path,
         }))
+    else:
+        if not isinstance(grabbed, Image.Image):
+            raise RuntimeError("Pillow did not read the Windows clipboard as an image or file list")
+        with grabbed:
+            print(json.dumps({
+                "size": image.size, "pixel": image.getpixel((2, 3)), "has_dib": has_dib,
+                "grabbed_format": grabbed.format, "grabbed_size": grabbed.size,
+                "grabbed_pixel": grabbed.convert("RGBA").getpixel((2, 3)),
+            }))
 """
         with TemporaryDirectory() as directory:
-            app = Application(qt, Path(directory), testing=True)
+            folder = Path(directory).resolve()
+            app = Application(qt, folder, testing=True)
             clipboard = qt.clipboard()
             copied = False
             try:
-                for format_, color in (
-                    (QImage.Format.Format_RGB32, QColor(35, 88, 159)),
-                    (QImage.Format.Format_ARGB32, QColor(35, 88, 159, 117)),
-                    (QImage.Format.Format_ARGB32_Premultiplied, QColor(35, 88, 159, 117)),
+                app.workspace.set("save_folder", str(folder))
+                app.workspace.set("save_pattern", "屏幕 截图")
+                for action, format_, color in (
+                    ("copy", QImage.Format.Format_RGB32, QColor(35, 88, 159)),
+                    ("copy", QImage.Format.Format_ARGB32, QColor(35, 88, 159, 117)),
+                    ("copy", QImage.Format.Format_ARGB32_Premultiplied, QColor(35, 88, 159, 117)),
+                    ("save-copy", QImage.Format.Format_ARGB32_Premultiplied, QColor(35, 88, 159, 117)),
                 ):
-                    with self.subTest(image_format=format_):
+                    with self.subTest(action=action, image_format=format_):
                         image = QImage(16, 12, format_)
                         image.fill(QColor("white"))
                         image.setPixelColor(2, 3, color)
-                        app.output(image, "copy", silent=True, record=False)
+                        app.output(image, action, silent=True, record=False)
                         copied = True
                         process = QProcess()
                         try:
-                            process.start(sys.executable, ["-c", reader])
+                            arguments = ["-c", reader]
+                            if action == "save-copy":
+                                arguments.append("read-file-path")
+                            process.start(sys.executable, arguments)
                             self.assertTrue(process.waitForStarted(5000), process.errorString())
                             deadline = monotonic() + 10
                             while process.state() != QProcess.ProcessState.NotRunning and monotonic() < deadline:
@@ -119,9 +139,15 @@ with Image.open(BytesIO(payload), formats=["PNG"]) as source:
                             self.assertEqual(data["size"], [image.width(), image.height()])
                             self.assertEqual(data["pixel"], list(image.pixelColor(2, 3).getRgb()))
                             self.assertTrue(data["has_dib"])
-                            self.assertEqual(data["grabbed_format"], "PNG")
-                            self.assertEqual(data["grabbed_size"], data["size"])
-                            self.assertEqual(data["grabbed_pixel"], data["pixel"])
+                            if action == "save-copy":
+                                target, = folder.glob("*.png")
+                                self.assertEqual([Path(name) for name in data["files"]], [target])
+                                self.assertEqual(data["text"], str(target))
+                                self.assertEqual(QImage(str(target)).pixelColor(2, 3), image.pixelColor(2, 3))
+                            else:
+                                self.assertEqual(data["grabbed_format"], "PNG")
+                                self.assertEqual(data["grabbed_size"], data["size"])
+                                self.assertEqual(data["grabbed_pixel"], data["pixel"])
                         finally:
                             if process.state() != QProcess.ProcessState.NotRunning:
                                 process.kill()

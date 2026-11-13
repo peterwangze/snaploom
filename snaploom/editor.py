@@ -489,7 +489,9 @@ class CaptureEditor(QWidget):
         else:
             description = self._label("Drag to select an area, or press Space to start and finish keyboard selection. ",
                                       "拖动选择区域，或按空格开始和结束键盘框选。")
-            if self.default_action == "copy":
+            if self.default_action == "save-copy":
+                description += self._label("Press Enter to save and copy the selected area.", "按回车保存并复制选区。")
+            elif self.default_action == "copy":
                 description += self._label("Press Enter to copy the selected area.", "按回车复制选区。")
             else:
                 description += self._label("Press Enter to run the requested output.", "按回车执行指定输出。")
@@ -589,8 +591,9 @@ class CaptureEditor(QWidget):
             if self.default_action != "output":
                 actions |= {
                     action: lambda name=action: self._complete(name)
-                    for action in ("copy", "save", "pin", "quick-save", "copy-file")
+                    for action in ("save", "pin", "quick-save", "copy-file")
                 }
+                actions["copy"] = lambda: self._complete(self.default_action)
             actions["color"] = self._copy_color
         if self.color_only:
             actions = {"color": self._copy_color}
@@ -746,8 +749,10 @@ class CaptureEditor(QWidget):
                 if outputs:
                     primary.setToolTip("\n".join((primary.toolTip(), *outputs)))
             else:
+                title = (self._label("Save and Copy", "保存并复制") if self.default_action == "save-copy"
+                         else self._label("Copy", "复制"))
                 primary = self._button(
-                    actions, self._label("Copy", "复制"), lambda: self._complete("copy"),
+                    actions, title, lambda: self._complete(self.default_action),
                     shortcut=" / ".join(filter(None, (self._shortcut_label("copy"), "Enter"))),
                 )
                 self._button(actions, self._label("Pin", "贴图"), lambda: self._complete("pin"), shortcut=self._shortcut_label("pin"))
@@ -920,7 +925,7 @@ class CaptureEditor(QWidget):
         if custom:
             self.custom_output.emit(action, image, geometry)
             return
-        if action in {"save", "quick-save", "copy-file", "print", "ocr", "barcode"}:
+        if action in {"save", "quick-save", "copy-file", "save-copy", "print", "ocr", "barcode"}:
             self.completed.emit(action, image, geometry)
             return
         self.finished = True

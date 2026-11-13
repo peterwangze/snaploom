@@ -132,6 +132,11 @@ Windows 已通过原生保存对话框验证文件名输入、JPEG 写入和生�
 
 - Windows 普通「复制」先提供名为 `PNG` 的原生剪贴板格式，同时提供标准位图。独立进程分别用 Win32 和 iCode 使用的 Pillow 读取剪贴板，验证普通截图、透明图像以及编辑器使用的预乘透明图像的尺寸、颜色和透明度。[iCode 读取实现](https://github.com/openJiuwen-ai/iCode/blob/v0.35.2/src/chrys/app/tui/widgets/chrome/image_paste.py) · [Pillow 格式选择](https://github.com/python-pillow/Pillow/blob/13.0.0/src/display.c#L440-L470)
 
+## 1.0.18 保存并复制
+
+- 覆盖普通截图的按钮、快捷键和滚动截图。核对默认目录、中文文件名、最近保存记录，以及「另存为…」选择其他目录；默认目录写入失败时，选区、标注和之前的剪贴板内容都保留。
+- Windows 独立进程检查文件剪贴板、路径文字、PNG 和位图。使用真实 iCode 0.35.2 输入框接收按键和终端粘贴事件，确认生成的图片附件指向同一个已保存文件。此测试未向实际终端窗口发送物理按键。[Windows 验证](https://github.com/peterwangze/snaploom/actions/runs/43358673819) · [Windows Terminal 读取剪贴板的实现](https://github.com/microsoft/terminal/blob/v1.24.12741.0/src/cascadia/TerminalApp/TerminalPage.cpp#L154-L194)
+
 ## 发布包的环境边界
 
 - Windows x64 离线安装通过 Inno Setup，提供安装和免安装两种形式。当前包无 Authenticode 签名。
