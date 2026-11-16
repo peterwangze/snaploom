@@ -1890,8 +1890,12 @@ def smoke_test(qt, ocr=False):
 
     from .capture import Snapshot
     from .editor import CaptureEditor
+    from .update_install import HELPER_NAME
 
     assert QSslSocket.supportsSsl(), "Secure update connections are unavailable"
+    if getattr(sys, "frozen", False):
+        helper = Path(sys._MEIPASS) / HELPER_NAME
+        assert helper.is_file() and os.access(helper, os.X_OK), "Packaged updater is unavailable"
     with tempfile.TemporaryDirectory(prefix="snaploom-smoke-") as directory:
         app = Application(qt, Path(directory), testing=True)
         try:
