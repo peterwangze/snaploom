@@ -92,7 +92,7 @@ class Application:
         self.corner_timer = QTimer(interval=180)
         self.corner_timer.timeout.connect(self.check_corner)
         self.tray = QSystemTrayIcon(app_icon())
-        self.tray.setToolTip("Snaploom")
+        self.tray.setToolTip(f"Snaploom v{VERSION}")
         self.tray.activated.connect(self.tray_clicked)
         self.tray_menu = QMenu()
         self.tray.setContextMenu(self.tray_menu)
@@ -1776,7 +1776,7 @@ class Application:
         paste_hint = self.tr(f"Press {paste} to pin clipboard content.", f"按 {paste} 悬浮剪贴板内容。") if paste else self.tr(
             "Choose Pin clipboard content from the main window or tray.", "可从主窗口或托盘选择「悬浮剪贴板内容」。")
         QMessageBox.information(
-            self.dashboard, "Snaploom",
+            self.dashboard, f"Snaploom v{VERSION}",
             "\n".join((capture_hint, paste_hint, self.tr(
                 "On the screenshot canvas, Enter confirms the selection, then saves and copies it. "
                 "Restore last hidden pin brings back a pin you hid earlier. Change shortcuts in Settings.",

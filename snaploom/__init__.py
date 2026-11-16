@@ -1,3 +1,3 @@
 """Snaploom screenshot and floating reference workspace."""
 
-VERSION = "1.0.19"
+VERSION = "1.0.20"

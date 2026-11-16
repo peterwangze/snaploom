@@ -5,7 +5,7 @@ from pathlib import Path
 from time import monotonic, sleep
 from unittest.mock import patch
 
-from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QRect, Qt, QTimer, QUrl
+from PySide6.QtCore import QCoreApplication, QEvent, QLocale, QMimeData, QPoint, QPointF, QRect, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon, QTabWidget, QTextEdit, QToolButton,
 )
 
+from snaploom import VERSION
 from snaploom.app import Application
 from snaploom.capture import CaptureError, Snapshot
 from snaploom.commands import arguments
@@ -271,6 +272,30 @@ class UserJourneyTests(unittest.TestCase):
         self.assertIn("F8", text)
         self.assertIn(app.tr("Pin clipboard content", "悬浮剪贴板内容"), text)
         self.assertNotIn("F3", text)
+
+    def test_current_version_is_visible_in_workspace_and_help(self):
+        for locale, accessible_label in (("en_US", "Version"), ("zh_CN", "版本")):
+            with self.subTest(locale=locale):
+                self.stop_application()
+                with patch.object(QLocale, "system", return_value=QLocale(locale)):
+                    self.start_application()
+                version = self.application.dashboard.findChild(QLabel, "AppVersion")
+                self.assertIsNotNone(version)
+                self.assertTrue(version.isVisible())
+                self.assertEqual(version.text(), f"v{VERSION}")
+                self.assertIn(accessible_label, version.accessibleName())
+                self.assertIn(VERSION, version.accessibleName())
+                title = f"Snaploom v{VERSION}"
+                self.assertEqual(self.application.tray.toolTip(), title)
+                with patch.object(QMessageBox, "information") as show:
+                    self.click(self.button(self.application.dashboard, "Help", "操作帮助"))
+                    show.assert_called_once()
+                    self.assertEqual(show.call_args.args[1], title)
+
+                    show.reset_mock()
+                    self.tray_item("Help", "操作帮助")
+                    show.assert_called_once()
+                    self.assertEqual(show.call_args.args[1], title)
 
     def test_editor_more_menu_closes_with_escape_without_cancelling_capture(self):
         editor = self.open_capture()

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from . import VERSION
 from .capture import disable_capture_window_transitions
 from .hotkeys import LABELS, editor_key_for_hotkey, parse
 from .storage import DEFAULTS, pictures_directory
@@ -83,7 +84,15 @@ class Dashboard(QWidget):
         title.setAccessibleName("Snaploom")
         content.addWidget(title)
         content.addStretch()
-        content.addWidget(QLabel(self.tr("Screenshot workspace", "截图工作台"), objectName="BrandSubtitle"))
+        details = QVBoxLayout()
+        details.setSpacing(3)
+        alignment = Qt.AlignmentFlag.AlignRight
+        details.addWidget(QLabel(self.tr("Screenshot workspace", "截图工作台"), objectName="BrandSubtitle"),
+                          alignment=alignment)
+        version = QLabel(f"v{VERSION}", objectName="AppVersion")
+        version.setAccessibleName(self.tr(f"Version {VERSION}", f"版本 {VERSION}"))
+        details.addWidget(version, alignment=alignment)
+        content.addLayout(details)
         layout.addWidget(header)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
@@ -133,7 +142,7 @@ class Dashboard(QWidget):
         self.setStyleSheet("""
             #Brand { background: #152841; border-radius: 12px; }
             #BrandTitle { color: #ffffff; font-size: 25px; font-weight: bold; }
-            #BrandSubtitle { color: #bdcce1; }
+            #BrandSubtitle, #AppVersion { color: #bdcce1; }
             QPushButton { padding: 7px 11px; }
             QPushButton#Primary { background: #2164d5; color: white; border: 1px solid #1859bc;
                                   border-radius: 9px; font-weight: bold; padding: 15px; }
