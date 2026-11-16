@@ -6,13 +6,14 @@ import re
 import shlex
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths, Qt, QUrl
+from PySide6.QtCore import QStandardPaths, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout,
 )
 
 from . import VERSION
+from .update_install import package_kind
 from .update_transfer import UpdateTransfer
 from .updates import RELEASES_URL
 
@@ -57,10 +58,13 @@ def _download_target(name: str) -> Path:
 
 
 class UpdateDialog(QDialog):
-    def __init__(self, translate, parent=None, *, client=None, current_version=VERSION):
+    install_requested = Signal(object, object, object, str)  # release, asset, path, digest
+
+    def __init__(self, translate, parent=None, *, client=None, current_version=VERSION, install_kind=None):
         super().__init__(parent)
         self.tr = translate
         self.current_version = current_version
+        self.install_kind = install_kind
         self.client = client if client is not None else UpdateTransfer(self)
         self._release = None
         self._task = None
@@ -121,9 +125,10 @@ class UpdateDialog(QDialog):
         actions.addStretch()
         self.recheck = self._button("UpdateRecheck", "Check again", "重新检查", self.check_for_updates)
         self.download = self._button("UpdateDownload", "Download", "下载更新", self._start_download)
+        self.install = self._button("UpdateInstall", "Install and restart", "安装并重启", self._request_install)
         self.cancel = self._button("UpdateCancel", "Cancel", "取消", self._cancel_task)
-        close = self._button("UpdateClose", "Close", "关闭", self.reject)
-        for button in (self.recheck, self.download, self.cancel, close):
+        self.close_button = self._button("UpdateClose", "Close", "关闭", self.reject)
+        for button in (self.recheck, self.download, self.install, self.cancel, self.close_button):
             actions.addWidget(button)
         layout.addLayout(actions)
 
@@ -161,23 +166,28 @@ class UpdateDialog(QDialog):
     def _sync_controls(self):
         checking = self._task == "check"
         downloading = self._task == "download"
-        busy = checking or downloading
+        installing = self._task == "install"
+        busy = checking or downloading or installing
         has_packages = self.package.count() > 0
         can_verify = self._release is not None and self._release.checksum is not None
         current = self.package.currentData()
         saved = current is not None and current.name in self._saved_packages
+        can_install = saved and package_kind(current.name) == self.install_kind
         has_notes = self._release is not None and self._release.newer_than(self.current_version)
 
         for widget in (self.notes_title, self.notes):
             widget.setVisible(has_notes)
         for widget in (self.package_label, self.package):
             widget.setVisible(has_packages)
-        self.download.setVisible(has_packages and can_verify)
+        self.download.setVisible(has_packages and can_verify and not saved)
         self.package.setEnabled(not busy)
         self.recheck.setEnabled(not busy)
         self.download.setEnabled(not busy and not saved)
+        self.install.setVisible(can_install)
+        self.install.setEnabled(can_install and not busy)
+        self.close_button.setEnabled(not installing)
         self.progress.setVisible(downloading)
-        self.cancel.setVisible(busy)
+        self.cancel.setVisible(checking or downloading)
         self.cancel.setText(self.tr("Cancel download", "取消下载") if downloading else self.tr("Cancel check", "取消检查"))
         self.open_folder.setVisible(saved and not busy)
 
@@ -212,7 +222,10 @@ class UpdateDialog(QDialog):
         self.notes.setPlainText(_notes_text(release.notes) or self.tr("No release notes were provided.", "此版本暂无更新说明。"))
         if self.height() < 410:
             self.resize(self.width(), 410)
-        for asset in release.packages():
+        packages = release.packages()
+        if self.install_kind:
+            packages = sorted(packages, key=lambda asset: package_kind(asset.name) != self.install_kind)
+        for asset in packages:
             self.package.addItem(self._package_text(asset), asset)
         if not self.package.count():
             self._set_feedback(self.tr(
@@ -244,7 +257,7 @@ class UpdateDialog(QDialog):
             if saved is None:
                 self._set_feedback()
             else:
-                self._show_saved_package(saved, asset)
+                self._show_saved_package(saved[0], asset)
         self._sync_controls()
 
     def _start_download(self):
@@ -268,19 +281,22 @@ class UpdateDialog(QDialog):
             self.progress.setRange(0, 100)
             self.progress.setValue(max(0, min(100, received * 100 // total)))
 
-    def _downloaded(self, path):
+    def _downloaded(self, path, digest):
         if self._task != "download":
             return
         asset = self._active_package
         path = Path(path)
         self._task = None
         self._active_package = None
-        self._saved_packages[asset.name] = path
+        self._saved_packages[asset.name] = (path, digest)
         self._show_saved_package(path, asset)
         self._sync_controls()
 
     def _show_saved_package(self, path, asset):
-        if asset.name.endswith((".zip", ".tar.gz")):
+        if package_kind(asset.name) == self.install_kind:
+            instruction = self.tr("Install and restart will restore your open work.",
+                                  "安装并重启后会恢复当前打开的内容。")
+        elif asset.name.endswith((".zip", ".tar.gz")):
             instruction = self.tr("Extract the package to use the new version.", "解压后即可使用新版。")
         elif asset.name.endswith(".run"):
             command = f"sh {shlex.quote(str(path))}"
@@ -288,6 +304,23 @@ class UpdateDialog(QDialog):
         else:
             instruction = self.tr("Open the downloaded package to install the update.", "打开下载的安装包即可安装更新。")
         self._set_feedback(self.tr(f"Verified and saved to {path}\n{instruction}", f"校验通过，已保存到 {path}\n{instruction}"))
+
+    def _request_install(self):
+        asset = self.package.currentData()
+        if self._task is not None or asset is None or package_kind(asset.name) != self.install_kind:
+            return
+        saved = self._saved_packages.get(asset.name)
+        if saved is None:
+            return
+        self._task = "install"
+        self._set_feedback(self.tr("Saving your work before installing…", "正在保存当前工作，准备安装…"))
+        self._sync_controls()
+        self.install_requested.emit(self._release, asset, *saved)
+
+    def install_failed(self, message):
+        self._task = None
+        self._set_feedback(message)
+        self._sync_controls()
 
     def _failed(self, code):
         task, self._task = self._task, None
@@ -303,7 +336,7 @@ class UpdateDialog(QDialog):
         self._sync_controls()
 
     def _cancel_task(self):
-        if self._task is not None:
+        if self._task in {"check", "download"}:
             self.client.cancel()
 
     def _cancelled(self):
@@ -322,6 +355,7 @@ class UpdateDialog(QDialog):
 
     def _open_folder(self):
         current = self.package.currentData()
-        path = self._saved_packages.get(current.name) if current is not None else None
+        saved = self._saved_packages.get(current.name) if current is not None else None
+        path = saved[0] if saved is not None else None
         if path is not None and not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent))):
             self._set_feedback(self.tr(f"Could not open {path.parent}", f"无法打开 {path.parent}"))

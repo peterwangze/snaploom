@@ -37,6 +37,12 @@ def windows_version(filename, description):
     )
 
 
+update_analysis = Analysis([str(root / "run_snaploom_update.py")], pathex=[str(root)])
+update_helper = EXE(
+    PYZ(update_analysis.pure), update_analysis.scripts, update_analysis.binaries, update_analysis.datas,
+    name="Snaploom-update", console=True, upx=False, codesign_identity=identity,
+)
+
 analysis = Analysis(
     [str(root / "run_snaploom.py")],
     pathex=[str(root)],
@@ -45,6 +51,7 @@ analysis = Analysis(
     + copy_metadata("rapidocr_onnxruntime"),
     hiddenimports=[f"pynput.keyboard.{backend}", f"pynput.mouse.{backend}"],
 )
+analysis.binaries.append((Path(update_helper.name).name, update_helper.name, "BINARY"))
 if windows:
     # Qt uses the Windows ICU ABI. A build host can expose unrelated ICU DLLs
     # on PATH, where PyInstaller finds them before the operating system copy.

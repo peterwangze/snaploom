@@ -12,6 +12,8 @@ import sys
 import sysconfig
 import tarfile
 import tempfile
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 from importlib import metadata
 from pathlib import Path
 
@@ -291,10 +293,40 @@ def checksums(release):
             checksums_file.write(f"{digest}  {artifact.name}\n")
 
 
+def verify_packaged_updates(work, staging, baseline):
+    """Use an actual previous release and the new artifacts for install/restart acceptance."""
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", baseline) is None or baseline == version():
+        raise ValueError("The update acceptance baseline must be a different release version")
+    root = f"https://github.com/peterwangze/snaploom/releases/download/v{baseline}/"
+    headers = {"User-Agent": "Snaploom packaging acceptance"}
+    with urlopen(Request(root + "SHA256SUMS.txt", headers=headers), timeout=45) as response:
+        entries = response.read(8192).decode("ascii").splitlines()
+    digests = {name: digest for digest, name in (line.split("  ", 1) for line in entries)}
+    helper = work / "frozen" / ("Snaploom-update.exe" if sys.platform == "win32" else "Snaploom-update")
+    for package in sorted(staging.iterdir()):
+        name = package.name.replace(f"Snaploom-{version()}-", f"Snaploom-{baseline}-", 1)
+        old = work / name
+        for attempt in range(3):
+            try:
+                with urlopen(Request(root + name, headers=headers), timeout=60) as response, old.open("wb") as target:
+                    shutil.copyfileobj(response, target)
+                break
+            except (OSError, URLError):
+                if attempt == 2:
+                    raise
+        with old.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != digests.get(name):
+                raise ValueError(f"Unexpected checksum for {name}")
+        run(sys.executable, ROOT / "tests" / "packaged_update_acceptance.py", "--old-package", old,
+            "--new-package", package, "--helper", helper, timeout=360)
+        old.unlink()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke", action="store_true", help="Install the package and verify GUI and offline OCR")
     parser.add_argument("--checksums-only", action="store_true")
+    parser.add_argument("--verify-update-from", help="Verify packaged install and restart from this public version")
     args = parser.parse_args()
     RELEASE.mkdir(exist_ok=True)
     if args.checksums_only:
@@ -318,6 +350,8 @@ def main():
             package_mac(work, frozen, notices, staging, basename, args.smoke)
         else:
             package_linux(work, frozen, icon, notices, staging, basename, args.smoke)
+        if args.verify_update_from:
+            verify_packaged_updates(work, staging, args.verify_update_from)
         for path in staging.iterdir():
             path.replace(RELEASE / path.name)
     checksums(RELEASE)

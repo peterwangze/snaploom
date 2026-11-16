@@ -63,7 +63,7 @@ class UpdateTransfer(QObject):
 
     checked = Signal(object)  # Release
     progress = Signal(object, object)  # Python int bytes received, total
-    downloaded = Signal(object)  # Path
+    downloaded = Signal(object, str)  # Path, verified SHA-256
     failed = Signal(str)  # Stable error code for the translated UI.
     cancelled = Signal()
 
@@ -258,8 +258,9 @@ class UpdateTransfer(QObject):
             return
         download.output.setAutoRemove(False)
         path = download.destination
+        digest = download.expected
         self._reset()
-        self.downloaded.emit(path)
+        self.downloaded.emit(path, digest)
 
     def _close_reply(self, *, abort=False):
         reply, self._reply = self._reply, None

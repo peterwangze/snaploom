@@ -265,7 +265,7 @@ class UpdateDownloadTests(unittest.TestCase):
     def test_dialog_offers_matching_packages_and_downloads_without_overwriting(self):
         manager = ScriptedManager(self.routes())
         client = UpdateTransfer(manager=manager)
-        dialog = UpdateDialog(lambda en, zh: en, client=client, current_version="1.0.20")
+        dialog = UpdateDialog(lambda en, zh: en, client=client, current_version="1.0.20", install_kind="installer")
         self.addCleanup(dialog.close)
         dialog.show()
         with patch("snaploom.updates.platform.system", return_value="Windows"), patch(
@@ -277,6 +277,7 @@ class UpdateDownloadTests(unittest.TestCase):
         self.assertIn("Smoother input.", dialog.notes.toPlainText())
         self.assertNotIn("Installer table", dialog.notes.toPlainText())
         self.assertEqual(dialog.package.count(), 2)
+        self.assertTrue(dialog.install.isHidden())
         self.assertIn("Installer", dialog.package.itemText(0))
         self.assertIn("Portable", dialog.package.itemText(1))
         self.assertEqual(manager.urls, [LATEST_RELEASE_URL])
@@ -292,6 +293,15 @@ class UpdateDownloadTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), FIXTURE)
             self.assertIn("Verified", dialog.download_status.text())
             self.assertIn(target.name, dialog.download_status.text())
+            self.assertTrue(dialog.install.isVisible())
+            install_calls = []
+            dialog.install_requested.connect(lambda *args: install_calls.append(args))
+            QTest.mouseClick(dialog.install, Qt.MouseButton.LeftButton)
+            release, asset, chosen_path, digest = install_calls[0]
+            self.assertEqual((release.version, asset.name, chosen_path, digest), (VERSION, INSTALLER, target, CHECKSUM))
+            self.assertFalse(dialog.install.isEnabled())
+            dialog.install_failed("Couldn’t start the installer.")
+            self.assertTrue(dialog.install.isEnabled())
             with patch.object(QDesktopServices, "openUrl", return_value=True) as open_url:
                 QTest.mouseClick(dialog.open_folder, Qt.MouseButton.LeftButton)
             self.assertEqual(Path(open_url.call_args.args[0].toLocalFile()), Path(folder))
@@ -329,8 +339,8 @@ class UpdateDownloadTests(unittest.TestCase):
                 tray = next(action for action in app.tray_menu.actions()
                             if action.text() == app.tr("Check for updates…", "检查更新…"))
                 self.assertEqual(manager.urls, [])
-                with patch("snaploom.update_dialog.UpdateDialog", side_effect=lambda translate: UpdateDialog(
-                    translate, client=client,
+                with patch("snaploom.update_dialog.UpdateDialog", side_effect=lambda translate, **options: UpdateDialog(
+                    translate, client=client, **options,
                 )):
                     QTest.mouseClick(button, Qt.MouseButton.LeftButton)
                     dialog = app.update_dialog
