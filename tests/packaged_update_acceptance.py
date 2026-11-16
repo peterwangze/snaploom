@@ -7,6 +7,7 @@ import hashlib
 import io
 import os
 import platform
+import re
 import subprocess
 import sys
 import tarfile
@@ -35,7 +36,6 @@ from snaploom.update_restart_state import save_restart_state
 from snaploom.updates import RELEASES_URL, Release, ReleaseAsset
 
 
-BASELINE = "1.0.21"
 SAVE_PATTERN = "Configured screenshot format from the previous version"
 OPEN_IMAGE_COLOR = "#d41743"
 UPDATE_TIMEOUT = 240
@@ -156,7 +156,7 @@ def wait_for_old_app(lock, process):
     return None
 
 
-def test_file_asset(package, version):
+def release_asset(package, version):
     with package.open("rb") as source:
         digest = hashlib.file_digest(source, "sha256").hexdigest()
     url = f"{RELEASES_URL}/download/v{version}/{package.name}"
@@ -209,6 +209,10 @@ def report_logs(profile, baseline_log):
 
 def acceptance(old_package, new_package, helper):
     version = snaploom.VERSION
+    match = re.match(r"^Snaploom-(\d+\.\d+\.\d+)-", old_package.name)
+    if match is None:
+        raise ValueError("The baseline must use an official Snaploom package name.")
+    baseline_version = match[1]
     if helper.name != HELPER_NAME or not helper.is_file():
         raise RuntimeError(f"Expected the packaged {HELPER_NAME} executable, got {helper}")
     with tempfile.TemporaryDirectory(prefix="snaploom packaged upgrade ", ignore_cleanup_errors=True) as folder:
@@ -237,16 +241,16 @@ def acceptance(old_package, new_package, helper):
                 portable_note = executable.parent / "User file kept with their portable app.txt"
                 if portable:
                     portable_note.write_text("Portable user file", encoding="utf-8")
-                assert run([cli, "--version"], env, timeout=30).strip() == BASELINE.encode("ascii"), (
+                assert run([cli, "--version"], env, timeout=30).strip() == baseline_version.encode("ascii"), (
                     "The installed baseline does not match the required previous release."
                 )
                 with baseline_log.open("wb") as log:
                     baseline = subprocess.Popen([str(executable), "--background"], env=env,
                                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
                 old_pid = wait_until(lambda: wait_for_old_app(lock, baseline), 25, "The baseline did not start.")
-                release, asset, digest = test_file_asset(new_package, version)
+                release, asset, digest = release_asset(new_package, version)
                 with (
-                    patch.object(snaploom, "VERSION", BASELINE),
+                    patch.object(snaploom, "VERSION", baseline_version),
                     patch.object(sys, "executable", str(executable)),
                     patch.object(sys, "frozen", True, create=True),
                     patch.object(sys, "_MEIPASS", str(helper.parent), create=True),
@@ -273,7 +277,7 @@ def acceptance(old_package, new_package, helper):
                     )
                 run([cli, "quit"], env, timeout=20)
                 wait_until(lambda: not process_running(new_pid), 20, "The updated application did not quit.")
-                print(f"Packaged {platform.system()} {platform.machine()} upgrade {BASELINE} → {version}: "
+                print(f"Packaged {platform.system()} {platform.machine()} upgrade {baseline_version} -> {version}: "
                       "new process, editable draft, open image and settings verified.", flush=True)
             except Exception:
                 report_logs(profile, baseline_log)

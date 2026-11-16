@@ -138,6 +138,11 @@ def _compose_state(app, write_image):
             "geometry": _widget_geometry(app.dashboard),
         },
         "visible_pins": [pin_id for pin_id, window in app.pin_windows.items() if window.isVisible()],
+        "pin_state": {
+            str(pin_id): {"visible": window.state.get("visible", True), "hidden_at": window.state.get("hidden_at", 0)}
+            for pin_id, window in app.pin_windows.items()
+        },
+        "closed_pins": list(app.closed_pins),
         "last_region": rect_values(app.last_region) if app.last_region is not None else None,
         "editors": [],
         "recognition": [],
@@ -310,10 +315,19 @@ def _restore_state(app, state):
     app.dashboard.setVisible(dashboard["visible"])
     app.last_region = QRect(*state["last_region"]) if state["last_region"] is not None else None
     visible = set(state["visible_pins"])
+    pin_state = state.get("pin_state", {})
+    app.closed_pins = [pin_id for pin_id in state.get("closed_pins", app.closed_pins) if pin_id in app.pin_windows]
     for pin_id, window in app.pin_windows.items():
+        # Qt may close windows during shutdown. Restore the user's visibility
+        # choice separately from temporary hides during capture or group changes.
+        if saved := pin_state.get(str(pin_id)):
+            window.state["visible"] = saved["visible"]
+            window.state["hidden_at"] = saved["hidden_at"]
+            app.save_pin(pin_id)
         window.setVisible(pin_id in visible)
         if pin_id in visible:
             window.recover_position()
+    app.update_lists()
 
     def hidden_pins(draft):
         return [app.pin_windows[pin_id] for pin_id in draft["hidden_pins"] if pin_id in app.pin_windows]
