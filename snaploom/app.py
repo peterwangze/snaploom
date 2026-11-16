@@ -77,6 +77,7 @@ class Application:
         self.hotkeys_enabled = True
         self.corners_enabled = True
         self.dialogs = set()
+        self.update_dialog = None
         self.network = QNetworkAccessManager()
         self.hotkeys = Hotkeys()
         self.hotkeys.triggered.connect(self.action)
@@ -176,7 +177,8 @@ class Application:
             ("recover", "Recover off-screen pins", "找回屏幕外贴图"),
             ("no-click-through", "Disable click-through for all pins", "关闭所有贴图的鼠标穿透"),
             ("history", "History", "历史"), ("settings", "Settings", "设置"),
-            ("help", "Help", "操作帮助"), ("quit", "Quit", "退出"),
+            ("help", "Help", "操作帮助"), ("check-updates", "Check for updates…", "检查更新…"),
+            ("quit", "Quit", "退出"),
         ):
             self.tray_menu.addAction(self.tr(en, zh), lambda checked=False, name=action: self.action(name))
 
@@ -276,6 +278,13 @@ class Application:
             self.settings()
         elif action == "help":
             self.help()
+        elif action == "check-updates":
+            self.check_updates()
+        elif action == "github-star":
+            from .updates import PROJECT_URL
+
+            if not QDesktopServices.openUrl(QUrl(PROJECT_URL)):
+                self.notify(self.tr("Could not open GitHub.", "无法打开 GitHub。"), error=True)
         elif action == "quit":
             self.qt.quit()
 
@@ -1767,6 +1776,22 @@ class Application:
         for key, flags in ((0x11, 0), (0x56, 0), (0x56, 2), (0x11, 2)):
             user32.keybd_event(key, 0, flags, 0)
 
+    def check_updates(self):
+        from .update_dialog import UpdateDialog
+
+        if self.update_dialog is not None:
+            self.update_dialog.showNormal()
+            self.update_dialog.raise_()
+            self.update_dialog.activateWindow()
+            return
+        dialog = UpdateDialog(self.tr)
+        self.update_dialog = dialog
+        dialog.setWindowIcon(app_icon())
+        dialog.finished.connect(lambda: setattr(self, "update_dialog", None))
+        self.keep_dialog(dialog)
+        dialog.activateWindow()
+        dialog.check_for_updates()
+
     def help(self):
         shortcuts = self.workspace.get("hotkeys")
         capture = shortcuts.get("capture") if self.hotkeys_enabled and "capture" not in self.hotkeys.unavailable else None
@@ -1786,6 +1811,8 @@ class Application:
         )
 
     def shutdown(self):
+        if self.update_dialog is not None:
+            self.update_dialog.reject()
         self.hotkeys.close()
         if self.mouse_hook:
             self.mouse_hook.stop()
@@ -1806,9 +1833,12 @@ class HookPair:
 
 
 def smoke_test(qt, ocr=False):
+    from PySide6.QtNetwork import QSslSocket
+
     from .capture import Snapshot
     from .editor import CaptureEditor
 
+    assert QSslSocket.supportsSsl(), "Secure update connections are unavailable"
     with tempfile.TemporaryDirectory(prefix="snaploom-smoke-") as directory:
         app = Application(qt, Path(directory), testing=True)
         try:

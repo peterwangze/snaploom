@@ -172,8 +172,10 @@ class UserJourneyTests(unittest.TestCase):
             ("Open image…", "打开图像…", "open"), ("Restore last hidden pin", "恢复最近隐藏的贴图", "restore-last-pin"),
             ("Show or hide pins", "显示或隐藏贴图", "toggle_pins"),
             ("Help", "操作帮助", "help"), ("Settings", "设置", "settings"),
+            ("Check for updates…", "检查更新…", "check-updates"),
         )
-        workspace = (*common, ("Repeat last region", "重复上次区域", "repeat"))
+        workspace = (*common, ("Repeat last region", "重复上次区域", "repeat"),
+                     ("Star on GitHub", "GitHub 点星", "github-star"))
         tray = (
             *common, ("Open Snaploom", "打开 Snaploom", "dashboard"), ("Repeat last capture", "重复上次区域", "repeat"),
             ("Pin clipboard content", "悬浮剪贴板内容", "paste"), ("Recover off-screen pins", "找回屏幕外贴图", "recover"),

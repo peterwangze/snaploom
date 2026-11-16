@@ -91,7 +91,13 @@ class Dashboard(QWidget):
                           alignment=alignment)
         version = QLabel(f"v{VERSION}", objectName="AppVersion")
         version.setAccessibleName(self.tr(f"Version {VERSION}", f"版本 {VERSION}"))
-        details.addWidget(version, alignment=alignment)
+        version_row = QHBoxLayout()
+        version_row.setSpacing(9)
+        version_row.addWidget(version)
+        update = QPushButton(self.tr("Check for updates…", "检查更新…"), objectName="UpdateCheck")
+        update.clicked.connect(lambda: self.action.emit("check-updates"))
+        version_row.addWidget(update)
+        details.addLayout(version_row)
         content.addLayout(details)
         layout.addWidget(header)
         self.tabs = QTabWidget()
@@ -132,6 +138,12 @@ class Dashboard(QWidget):
         self.save_location_button.clicked.connect(lambda: self.action.emit("open-save-location"))
         self.save_location_button.hide()
         bottom.addWidget(self.save_location_button)
+        star = QPushButton(self.tr("Star on GitHub", "GitHub 点星"), objectName="GitHubStar")
+        star.setFlat(True)
+        star.setCursor(Qt.CursorShape.PointingHandCursor)
+        star.setToolTip(self.tr("Open the Snaploom project on GitHub", "在 GitHub 打开 Snaploom 项目"))
+        star.clicked.connect(lambda: self.action.emit("github-star"))
+        bottom.addWidget(star)
         help_button = QPushButton(self.tr("Help", "操作帮助"))
         help_button.clicked.connect(lambda: self.action.emit("help"))
         bottom.addWidget(help_button)
@@ -149,6 +161,10 @@ class Dashboard(QWidget):
             QPushButton#Primary:hover { background: #1859bc; }
             QPushButton#Primary:focus { border: 2px solid #82afff; }
             QPushButton#Secondary { padding: 15px; font-weight: bold; }
+            QPushButton#UpdateCheck { color: white; background: #244060; border: 1px solid #567393;
+                                      border-radius: 5px; padding: 4px 8px; }
+            QPushButton#UpdateCheck:hover { background: #35567a; }
+            QPushButton#UpdateCheck:focus { border-color: #a8d0ff; }
             QLabel#Section { font-size: 15px; font-weight: bold; }
             QTabWidget::pane { top: -1px; }
             QListWidget::item { padding: 7px; }
