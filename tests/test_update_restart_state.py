@@ -161,6 +161,37 @@ class UpdateRestartTests(unittest.TestCase):
         exported, = (self.folder / "exports").glob("*.png")
         self.assertEqual(QImage(str(exported)).size().toTuple(), (100, 70))
 
+    def test_restart_restores_pin_visibility_and_hide_order_after_window_close(self):
+        app = self.open_app()
+        opened = app.open_pin(self.image())
+        second = app.open_pin(self.image())
+        first = app.open_pin(self.image())
+        other_group = app.open_pin(self.image(), state={"group": "Other"})
+        app.pin_action("hide", first)
+        app.pin_action("hide", second)
+        app.workspace.set("restore_pins", False)
+        save_restart_state(app)
+
+        # QApplication closes open windows on normal exit. A pin's close event
+        # persists a dismissal even though the user did not close that pin.
+        app.pin_windows[opened].close()
+        self.assertFalse(app.pin_windows[opened].state["visible"])
+        self.assertEqual(app.closed_pins, [first, second, opened])
+        self.close_app()
+        app = self.open_app()
+        self.assertTrue(restore_restart_state(app))
+
+        persisted = {pin_id: state for pin_id, _, state in app.workspace.pins()}
+        self.assertTrue(app.pin_windows[opened].isVisible())
+        self.assertTrue(persisted[opened]["visible"])
+        self.assertEqual(persisted[opened].get("hidden_at", 0), 0)
+        self.assertTrue(persisted[other_group]["visible"])
+        self.assertFalse(app.pin_windows[other_group].isVisible())
+        self.assertEqual(app.closed_pins, [first, second])
+        app.restore_last_pin()
+        self.assertTrue(app.pin_windows[second].isVisible())
+        self.assertFalse(app.pin_windows[first].isVisible())
+
     def test_restart_preserves_stitched_scroll_draft(self):
         app = self.open_app()
         app.workspace.set("save_folder", str(self.folder / "scrolled"))
