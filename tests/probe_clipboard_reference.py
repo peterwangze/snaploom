@@ -113,8 +113,7 @@ def compare(executable):
                 "image": True, "text": False, "file_drop": False,
             }
 
-            config = f"--config={root / 'snipaste.ini'}"
-            snipaste = subprocess.Popen([executable, config], cwd=root)
+            snipaste = subprocess.Popen([executable], cwd=executable.parent)
             try:
                 surface = QWidget(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
                 surface.setStyleSheet("background: #245886;")
@@ -126,11 +125,17 @@ def compare(executable):
                 assert sample == COLOR, f"Hosted screen does not show the synthetic fixture: {sample}"
 
                 sequence = user.GetClipboardSequenceNumber()
-                for _ in range(3):
-                    subprocess.run([executable, config, "snip", "--full", "-o", "clipboard"], cwd=root, timeout=5)
+                for arguments in (
+                    ("snip", "--full", "-o", "clipboard"),
+                    ("--snip-full", "--output", "clipboard"),
+                ):
+                    process = subprocess.Popen([executable, *arguments], cwd=executable.parent)
                     deadline = monotonic() + 5
                     while monotonic() < deadline and user.GetClipboardSequenceNumber() == sequence:
                         QTest.qWait(50)
+                    if process.poll() is None:
+                        process.terminate()
+                        process.wait(5)
                     if user.GetClipboardSequenceNumber() != sequence:
                         break
                 else:
