@@ -105,7 +105,8 @@ class ICodeClipboardTests(unittest.TestCase):
             app.workspace.set("save_pattern", "Screen capture")
             try:
                 for route in ("toolbar", "enter"):
-                    with self.subTest(route=route), (
+                    with (
+                        self.subTest(route=route),
                         patch("snaploom.capture.capture_desktop", return_value=Snapshot(source, source.rect())),
                         patch("snaploom.capture.detect_windows", return_value=[]),
                     ):
