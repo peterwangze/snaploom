@@ -31,3 +31,23 @@ jobs:
           QT_QPA_PLATFORM: windows
           SNAPLOOM_TEST_DESKTOP: '1'
         run: python -m unittest discover -s tests -p test_icode_clipboard.py -v
+      - name: Install pinned portable Windows Terminal in the test directory
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $archive = 'Microsoft.WindowsTerminal_1.25.3131.0_x64.zip'
+          gh release download v1.25.3131.0 --repo microsoft/terminal --pattern $archive --dir $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $download = Join-Path $env:RUNNER_TEMP $archive
+          if ((Get-FileHash -LiteralPath $download).Hash -ne '273d6f1502eca1b5bd95c43f5d4d7ec72cc503df340102f8659717e5bead3437') { throw 'Wrong terminal package hash' }
+          $destination = Join-Path $env:RUNNER_TEMP 'snaploom-terminal-host'
+          Expand-Archive -LiteralPath $download -DestinationPath $destination
+          $terminal = Get-ChildItem -LiteralPath $destination -Filter WindowsTerminal.exe -Recurse | Select-Object -First 1
+          if (-not $terminal) { throw 'WindowsTerminal.exe was not in the official archive' }
+          New-Item -Path (Join-Path $terminal.DirectoryName '.portable') -ItemType File
+          "SNAPLOOM_WINDOWS_TERMINAL=$($terminal.FullName)" >> $env:GITHUB_ENV
+      - name: Paste with Ctrl+V and Shift+Insert in the actual terminal host
+        env:
+          QT_QPA_PLATFORM: windows
+        run: python -c "import runpy; runpy.run_path('tests/verify_icode_terminal_host.py', run_name='__main__')"
