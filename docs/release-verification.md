@@ -140,8 +140,8 @@ Windows 已通过原生保存对话框验证文件名输入、JPEG 写入和生�
 ## 1.0.23 默认复制图片
 
 - 在独立 Windows 桌面比较 Snipaste 2.11.3、Snaploom 1.0.22 和候选版。Snipaste 普通截图提供系统位图，候选版提供 PNG 和系统位图，两者的剪贴板都没有文件路径。旧版同时提供图像和路径。候选版通过独立程序和 Chromium 富文本输入验证图片像素。 [剪贴板对照](https://github.com/peterwangze/snaploom/actions/runs/44038240294) · [Chromium 验证](https://github.com/peterwangze/snaploom/actions/runs/44038148622)
-- Windows 上用实际 iCode 0.35.2 输入框处理 `Ctrl+V`、`Shift+Insert` 和终端的括号粘贴序列，检查附件与 Snaploom 保存的 PNG 像素一致。终端序列由测试输入，按键在 iCode 输入框内验证。 [iCode 验证](https://github.com/peterwangze/snaploom/actions/runs/44037896553)
-- Windows、macOS 和 Linux X11 的剪贴板测试各使用独立进程读取图像和显式复制的文件。三平台五种架构的离线包均通过从 1.0.22 升级、重启和工作区恢复检查。 [三平台验收](https://github.com/peterwangze/snaploom/actions/runs/44037522683)
+- Windows 上先用实际 iCode 0.35.2 输入框验证按键及终端的括号粘贴序列，再通过官方 Windows Terminal 1.25.3131.0 窗口发送 `Ctrl+V` 和 `Shift+Insert`。两种快捷键都生成了图片附件，像素与 Snaploom 自动保存的 PNG 一致。 [iCode 控件验证](https://github.com/peterwangze/snaploom/actions/runs/44037896553) · [实际终端验证](https://github.com/peterwangze/snaploom/actions/runs/44038992610)
+- Windows、macOS 和 Linux X11 的剪贴板测试各使用独立进程读取图像和显式复制的文件。三平台的五组架构构建均通过从 1.0.22 升级、重启和工作区恢复检查。 [三平台验收](https://github.com/peterwangze/snaploom/actions/runs/44037522683)
 
 ## 发布包的环境边界
 
