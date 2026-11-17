@@ -15,6 +15,34 @@ identity = os.environ.get("SNAPLOOM_MAC_IDENTITY") if mac else None
 icon = os.environ["SNAPLOOM_BUILD_ICON"] if windows or mac else None
 version = os.environ["SNAPLOOM_BUILD_VERSION"]
 
+
+def windows_version(filename, description):
+    from PyInstaller.utils.win32.versioninfo import (
+        FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo, VarStruct, VSVersionInfo,
+    )
+
+    number = (*map(int, version.split(".")), 0)
+    return VSVersionInfo(
+        ffi=FixedFileInfo(filevers=number, prodvers=number),
+        kids=[
+            StringFileInfo([StringTable("040904B0", [
+                StringStruct("FileDescription", description),
+                StringStruct("FileVersion", version),
+                StringStruct("OriginalFilename", filename),
+                StringStruct("ProductName", "Snaploom"),
+                StringStruct("ProductVersion", version),
+            ])]),
+            VarFileInfo([VarStruct("Translation", [0x0409, 1200])]),
+        ],
+    )
+
+
+update_analysis = Analysis([str(root / "run_snaploom_update.py")], pathex=[str(root)])
+update_helper = EXE(
+    PYZ(update_analysis.pure), update_analysis.scripts, update_analysis.binaries, update_analysis.datas,
+    name="Snaploom-update", console=True, upx=False, codesign_identity=identity,
+)
+
 analysis = Analysis(
     [str(root / "run_snaploom.py")],
     pathex=[str(root)],
@@ -23,6 +51,7 @@ analysis = Analysis(
     + copy_metadata("rapidocr_onnxruntime"),
     hiddenimports=[f"pynput.keyboard.{backend}", f"pynput.mouse.{backend}"],
 )
+analysis.binaries.append((Path(update_helper.name).name, update_helper.name, "BINARY"))
 if windows:
     # Qt uses the Windows ICU ABI. A build host can expose unrelated ICU DLLs
     # on PATH, where PyInstaller finds them before the operating system copy.
@@ -33,13 +62,14 @@ modules = PYZ(analysis.pure)
 application = EXE(
     modules, analysis.scripts, exclude_binaries=True, name="Snaploom", console=False,
     upx=False, icon=icon, codesign_identity=identity,
+    version=windows_version("Snaploom.exe", "Snaploom") if windows else None,
 )
 executables = [application]
 if windows:
     # Both launchers load the same runtime, models, and compiled Python modules.
     executables.append(EXE(
         modules, analysis.scripts, exclude_binaries=True, name="Snaploom-cli", console=True,
-        upx=False, icon=icon,
+        upx=False, icon=icon, version=windows_version("Snaploom-cli.exe", "Snaploom command-line launcher"),
     ))
 collection = COLLECT(*executables, analysis.binaries, analysis.datas, upx=False, name="Snaploom")
 

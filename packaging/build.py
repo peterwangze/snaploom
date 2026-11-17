@@ -12,6 +12,8 @@ import sys
 import sysconfig
 import tarfile
 import tempfile
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 from importlib import metadata
 from pathlib import Path
 
@@ -24,7 +26,7 @@ VERSION_PATTERN = re.compile(r'^VERSION\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', re.M)
 
 
 def run(*args, **kwargs):
-    subprocess.run([str(argument) for argument in args], check=True, cwd=ROOT, **kwargs)
+    return subprocess.run([str(argument) for argument in args], check=True, cwd=ROOT, **kwargs)
 
 
 def version():
@@ -136,6 +138,31 @@ def smoke(executable, *options):
         run(executable, option, env=environment, timeout=90)
 
 
+def verify_cli_version(executable):
+    expected = f"{version()}\n"
+    result = run(executable, "--version", stdout=subprocess.PIPE, text=True, timeout=30)
+    if result.stdout != expected:
+        raise RuntimeError(f"Expected {expected!r} from {executable} --version, got {result.stdout!r}")
+
+
+def verify_windows_version(executable):
+    from PyInstaller.utils.win32.versioninfo import StringFileInfo, read_version_info_from_executable
+
+    expected = version()
+    resource = read_version_info_from_executable(str(executable))
+    if resource is None:
+        raise RuntimeError(f"{executable} has no Windows version resource")
+    strings = {
+        entry.name: entry.val
+        for info in resource.kids if isinstance(info, StringFileInfo)
+        for table in info.kids
+        for entry in table.kids
+    }
+    for field in ("FileVersion", "ProductVersion"):
+        if strings.get(field) != expected:
+            raise RuntimeError(f"{executable} has {field} {strings.get(field)!r}, expected {expected!r}")
+
+
 def sign_windows(executable):
     fingerprint = os.environ.get("SNAPLOOM_WINDOWS_CERT_SHA1")
     if not fingerprint:
@@ -171,8 +198,10 @@ def package_windows(work, frozen, icon, notices, release, basename, verify):
         run(setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", f"/DIR={installed}", timeout=150)
         try:
             command_line = installed / "Snaploom-cli.exe"
+            verify_cli_version(command_line)
+            verify_windows_version(command_line)
+            verify_windows_version(installed / executable.name)
             smoke(command_line)
-            run(command_line, "--version", timeout=30)
             smoke(installed / executable.name, "--smoke-test")
             if os.environ.get("SNAPLOOM_TEST_DESKTOP") == "1":
                 environment = os.environ | {
@@ -213,7 +242,9 @@ def package_mac(work, frozen, notices, release, basename, verify):
         mount.mkdir()
         run("hdiutil", "attach", "-quiet", "-readonly", "-nobrowse", "-mountpoint", mount, disk_image)
         try:
-            smoke(mount / "Snaploom.app" / "Contents" / "MacOS" / "Snaploom")
+            executable = mount / "Snaploom.app" / "Contents" / "MacOS" / "Snaploom"
+            verify_cli_version(executable)
+            smoke(executable)
         finally:
             run("hdiutil", "detach", "-quiet", mount)
 
@@ -244,6 +275,7 @@ def package_linux(work, frozen, icon, notices, release, basename, verify):
         environment.update(HOME=str(home), XDG_DATA_HOME=str(home / "data"))
         installed = home / "data" / "snaploom" / "app"
         run("sh", installer, env=environment, timeout=150)
+        verify_cli_version(installed / "Snaploom")
         smoke(installed / "Snaploom")
         run("sh", installed / "uninstall.sh", "--uninstall", env=environment, timeout=90)
         if installed.exists():
@@ -261,10 +293,40 @@ def checksums(release):
             checksums_file.write(f"{digest}  {artifact.name}\n")
 
 
+def verify_packaged_updates(work, staging, baseline):
+    """Use an actual previous release and the new artifacts for install/restart acceptance."""
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", baseline) is None or baseline == version():
+        raise ValueError("The update acceptance baseline must be a different release version")
+    root = f"https://github.com/peterwangze/snaploom/releases/download/v{baseline}/"
+    headers = {"User-Agent": "Snaploom packaging acceptance"}
+    with urlopen(Request(root + "SHA256SUMS.txt", headers=headers), timeout=45) as response:
+        entries = response.read(8192).decode("ascii").splitlines()
+    digests = {name: digest for digest, name in (line.split("  ", 1) for line in entries)}
+    helper = work / "frozen" / ("Snaploom-update.exe" if sys.platform == "win32" else "Snaploom-update")
+    for package in sorted(staging.iterdir()):
+        name = package.name.replace(f"Snaploom-{version()}-", f"Snaploom-{baseline}-", 1)
+        old = work / name
+        for attempt in range(3):
+            try:
+                with urlopen(Request(root + name, headers=headers), timeout=60) as response, old.open("wb") as target:
+                    shutil.copyfileobj(response, target)
+                break
+            except (OSError, URLError):
+                if attempt == 2:
+                    raise
+        with old.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != digests.get(name):
+                raise ValueError(f"Unexpected checksum for {name}")
+        run(sys.executable, ROOT / "tests" / "packaged_update_acceptance.py", "--old-package", old,
+            "--new-package", package, "--helper", helper, timeout=360)
+        old.unlink()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke", action="store_true", help="Install the package and verify GUI and offline OCR")
     parser.add_argument("--checksums-only", action="store_true")
+    parser.add_argument("--verify-update-from", help="Verify packaged install and restart from this public version")
     args = parser.parse_args()
     RELEASE.mkdir(exist_ok=True)
     if args.checksums_only:
@@ -288,6 +350,8 @@ def main():
             package_mac(work, frozen, notices, staging, basename, args.smoke)
         else:
             package_linux(work, frozen, icon, notices, staging, basename, args.smoke)
+        if args.verify_update_from:
+            verify_packaged_updates(work, staging, args.verify_update_from)
         for path in staging.iterdir():
             path.replace(RELEASE / path.name)
     checksums(RELEASE)

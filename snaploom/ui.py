@@ -13,9 +13,10 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from . import VERSION
 from .capture import disable_capture_window_transitions
 from .hotkeys import LABELS, editor_key_for_hotkey, parse
-from .storage import DEFAULTS
+from .storage import DEFAULTS, pictures_directory
 
 
 HOTKEY_ZH = {
@@ -23,7 +24,7 @@ HOTKEY_ZH = {
     "repeat": "重复上次区域", "click_through": "切换贴图鼠标穿透", "active": "截取当前窗口",
 }
 EDITOR_ACTIONS = {
-    "copy": ("Save and copy screenshot", "保存并复制截图"), "save": ("Save As…", "另存为…"),
+    "copy": ("Save and copy image", "保存并复制图片"), "save": ("Save As…", "另存为…"),
     "pin": ("Pin screenshot", "悬浮截图"), "quick-save": ("Quick save", "快速保存"),
     "copy-file": ("Save As and Copy File…", "另存为并复制文件…"), "refresh": ("Refresh screenshot", "刷新截图"),
     "color": ("Copy pixel color", "复制像素颜色"), "undo": ("Undo step", "撤销一步"),
@@ -83,7 +84,21 @@ class Dashboard(QWidget):
         title.setAccessibleName("Snaploom")
         content.addWidget(title)
         content.addStretch()
-        content.addWidget(QLabel(self.tr("Screenshot workspace", "截图工作台"), objectName="BrandSubtitle"))
+        details = QVBoxLayout()
+        details.setSpacing(3)
+        alignment = Qt.AlignmentFlag.AlignRight
+        details.addWidget(QLabel(self.tr("Screenshot workspace", "截图工作台"), objectName="BrandSubtitle"),
+                          alignment=alignment)
+        version = QLabel(f"v{VERSION}", objectName="AppVersion")
+        version.setAccessibleName(self.tr(f"Version {VERSION}", f"版本 {VERSION}"))
+        version_row = QHBoxLayout()
+        version_row.setSpacing(9)
+        version_row.addWidget(version)
+        update = QPushButton(self.tr("Check for updates…", "检查更新…"), objectName="UpdateCheck")
+        update.clicked.connect(lambda: self.action.emit("check-updates"))
+        version_row.addWidget(update)
+        details.addLayout(version_row)
+        content.addLayout(details)
         layout.addWidget(header)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
@@ -123,6 +138,12 @@ class Dashboard(QWidget):
         self.save_location_button.clicked.connect(lambda: self.action.emit("open-save-location"))
         self.save_location_button.hide()
         bottom.addWidget(self.save_location_button)
+        star = QPushButton(self.tr("Star on GitHub", "GitHub 点星"), objectName="GitHubStar")
+        star.setFlat(True)
+        star.setCursor(Qt.CursorShape.PointingHandCursor)
+        star.setToolTip(self.tr("Open the Snaploom project on GitHub", "在 GitHub 打开 Snaploom 项目"))
+        star.clicked.connect(lambda: self.action.emit("github-star"))
+        bottom.addWidget(star)
         help_button = QPushButton(self.tr("Help", "操作帮助"))
         help_button.clicked.connect(lambda: self.action.emit("help"))
         bottom.addWidget(help_button)
@@ -133,13 +154,17 @@ class Dashboard(QWidget):
         self.setStyleSheet("""
             #Brand { background: #152841; border-radius: 12px; }
             #BrandTitle { color: #ffffff; font-size: 25px; font-weight: bold; }
-            #BrandSubtitle { color: #bdcce1; }
+            #BrandSubtitle, #AppVersion { color: #bdcce1; }
             QPushButton { padding: 7px 11px; }
             QPushButton#Primary { background: #2164d5; color: white; border: 1px solid #1859bc;
                                   border-radius: 9px; font-weight: bold; padding: 15px; }
             QPushButton#Primary:hover { background: #1859bc; }
             QPushButton#Primary:focus { border: 2px solid #82afff; }
             QPushButton#Secondary { padding: 15px; font-weight: bold; }
+            QPushButton#UpdateCheck { color: white; background: #244060; border: 1px solid #567393;
+                                      border-radius: 5px; padding: 4px 8px; }
+            QPushButton#UpdateCheck:hover { background: #35567a; }
+            QPushButton#UpdateCheck:focus { border-color: #a8d0ff; }
             QLabel#Section { font-size: 15px; font-weight: bold; }
             QTabWidget::pane { top: -1px; }
             QListWidget::item { padding: 7px; }
@@ -380,7 +405,7 @@ class Preferences(QDialog):
         self.fields = {}
         for key, en, zh in (
             ("auto_save", "Automatically save other completed captures", "自动保存其他已完成的截图"),
-            ("copy_after_save", "Also copy the saved file when saving only", "仅保存时也复制已保存的文件"),
+            ("copy_after_save", "Copy the image after Save As or Quick Save", "另存为或快速保存后也复制图片"),
             ("include_cursor", "Include the cursor in screenshots", "截图包含鼠标指针"),
             ("restore_pins", "Reopen visible pins on startup", "启动时重新显示上次可见的贴图"),
             ("hide_pins_on_capture", "Hide pins during capture", "截图时隐藏贴图"),
@@ -393,6 +418,9 @@ class Preferences(QDialog):
         ):
             box = QCheckBox(self.tr(en, zh))
             box.setChecked(workspace.get(key))
+            if key == "auto_save":
+                box.setToolTip(self.tr("Keep a file for captures completed by actions such as Pin or Print.",
+                                       "贴图或打印等操作完成后，也保留一份截图文件。"))
             form.addRow(box)
             self.fields[key] = box
         for key, en, zh, minimum, maximum in (
@@ -435,6 +463,7 @@ class Preferences(QDialog):
         output_form = QFormLayout(output)
         tabs.addTab(output, self.tr("Output", "输出"))
         folder = QLineEdit(workspace.get("save_folder"))
+        folder.setPlaceholderText(str(pictures_directory()))
         pick = QPushButton(self.tr("Browse…", "浏览…"))
         pick.clicked.connect(lambda: self.choose_folder(folder))
         row = QHBoxLayout()

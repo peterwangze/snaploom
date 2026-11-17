@@ -21,6 +21,7 @@ def arguments(values):
     parser.add_argument("--background", action="store_true", help="Start in the system tray.")
     parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--smoke-test-ocr", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--resume-update", metavar="PROFILE", help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command")
     snip = commands.add_parser("snip", help="Start an interactive or scripted screenshot.")
     modes = snip.add_mutually_exclusive_group()

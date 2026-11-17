@@ -21,7 +21,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install iCode-TUI==0.35.2
-          "ICODE_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> $env:GITHUB_ENV
+          "SNAPLOOM_ICODE_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> $env:GITHUB_ENV
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -29,4 +29,5 @@ jobs:
       - name: Paste Snaploom clipboard images in the iCode chat input
         env:
           QT_QPA_PLATFORM: windows
-        run: python -c "import runpy; runpy.run_path('tests/verify_icode_clipboard.py', run_name='__main__')"
+          SNAPLOOM_TEST_DESKTOP: '1'
+        run: python -m unittest discover -s tests -p test_icode_clipboard.py -v

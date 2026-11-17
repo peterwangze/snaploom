@@ -77,6 +77,7 @@ class Application:
         self.hotkeys_enabled = True
         self.corners_enabled = True
         self.dialogs = set()
+        self.update_dialog = None
         self.network = QNetworkAccessManager()
         self.hotkeys = Hotkeys()
         self.hotkeys.triggered.connect(self.action)
@@ -92,7 +93,7 @@ class Application:
         self.corner_timer = QTimer(interval=180)
         self.corner_timer.timeout.connect(self.check_corner)
         self.tray = QSystemTrayIcon(app_icon())
-        self.tray.setToolTip("Snaploom")
+        self.tray.setToolTip(f"Snaploom v{VERSION}")
         self.tray.activated.connect(self.tray_clicked)
         self.tray_menu = QMenu()
         self.tray.setContextMenu(self.tray_menu)
@@ -176,7 +177,8 @@ class Application:
             ("recover", "Recover off-screen pins", "找回屏幕外贴图"),
             ("no-click-through", "Disable click-through for all pins", "关闭所有贴图的鼠标穿透"),
             ("history", "History", "历史"), ("settings", "Settings", "设置"),
-            ("help", "Help", "操作帮助"), ("quit", "Quit", "退出"),
+            ("help", "Help", "操作帮助"), ("check-updates", "Check for updates…", "检查更新…"),
+            ("quit", "Quit", "退出"),
         ):
             self.tray_menu.addAction(self.tr(en, zh), lambda checked=False, name=action: self.action(name))
 
@@ -276,6 +278,13 @@ class Application:
             self.settings()
         elif action == "help":
             self.help()
+        elif action == "check-updates":
+            self.check_updates()
+        elif action == "github-star":
+            from .updates import PROJECT_URL
+
+            if not QDesktopServices.openUrl(QUrl(PROJECT_URL)):
+                self.notify(self.tr("Could not open GitHub.", "无法打开 GitHub。"), error=True)
         elif action == "quit":
             self.qt.quit()
 
@@ -355,8 +364,8 @@ class Application:
         context = self.capture_context
         options = context["options"]
         try:
-            from .capture import Snapshot, active_window, capture_desktop, detect_elements, detect_windows
-            from .editor import CaptureEditor, render_annotations
+            from .capture import Snapshot, active_window, capture_desktop
+            from .editor import render_annotations
 
             if options.get("active_window"):
                 target = active_window()
@@ -385,42 +394,53 @@ class Application:
                     image = render_annotations(image, (), corner_radius=radius, logical_size=selection.size())
                 self.capture_completed("output", image, selection)
                 return
-            suggest_windows = self.workspace.get("detect_windows") and not options.get("whiteboard")
-            requested_output = options.get("output") or options.get("recognition")
-            editor_options = self._annotation_options() | {
-                "locale": self.locale, "show_guides": self.workspace.get("show_grid"),
-                "show_magnifier": self.workspace.get("show_magnifier"),
-                "auto_detect": suggest_windows,
-                "color_format": self.workspace.get("color_format").lower(),
-                "corner_radius": radius,
-                "custom_outputs": {name: name for name in self.workspace.get("custom_commands")},
-                "default_action": "output" if requested_output else "save-copy",
-                "requested_outputs": options.get("output", ()),
-                "aspect_ratio": (tuple(options["size"]) if options.get("size") and options.get("keep_aspect_ratio") else None),
-                "detect_elements": detect_elements if suggest_windows else None,
-                "allow_refresh": not options.get("whiteboard"),
-                "allow_scroll": not options.get("whiteboard"),
-                "color_only": options.get("color_only", False),
-            }
-            if options.get("recognition") == "barcode-copy":
-                editor_options["requested_output_label"] = self.tr("Scan and copy code", "识别并复制条码")
-            windows = detect_windows() if suggest_windows else ()
-            self.editor = CaptureEditor(snapshot, selection=selection, windows=windows, options=editor_options,
-                                        history=self.workspace.regions())
-            self._connect_annotation_settings(self.editor)
-            self.editor.completed.connect(self.capture_completed)
-            self.editor.cancelled.connect(self.capture_cancelled)
-            self.editor.refresh_requested.connect(self.refresh_capture)
-            if hasattr(self.editor, "custom_output"):
-                self.editor.custom_output.connect(self.custom_output)
-            if hasattr(self.editor, "color_copied"):
-                self.editor.color_copied.connect(self.color_copied)
-            self.editor.show()
-            self.editor.activateWindow()
-            self.editor.setFocus()
+            self.open_capture_editor(snapshot, selection, options, radius)
         except (OSError, RuntimeError, ValueError, ImportError, TypeError) as error:
             self.release_capture()
             self.failure(str(error), context.get("done"))
+
+    def open_capture_editor(self, snapshot, selection, options, radius, *, draft=None):
+        from .capture import detect_elements, detect_windows
+        from .editor import CaptureEditor
+
+        suggest_windows = self.workspace.get("detect_windows") and not options.get("whiteboard")
+        requested_output = options.get("output") or options.get("recognition")
+        editor_options = self._annotation_options() | {
+            "locale": self.locale, "show_guides": self.workspace.get("show_grid"),
+            "show_magnifier": self.workspace.get("show_magnifier"),
+            "auto_detect": suggest_windows,
+            "color_format": self.workspace.get("color_format").lower(),
+            "corner_radius": radius,
+            "custom_outputs": {name: name for name in self.workspace.get("custom_commands")},
+            "default_action": "output" if requested_output else "save-copy",
+            "requested_outputs": options.get("output", ()),
+            "aspect_ratio": (tuple(options["size"]) if options.get("size") and options.get("keep_aspect_ratio") else None),
+            "detect_elements": detect_elements if suggest_windows else None,
+            "allow_refresh": not options.get("whiteboard"),
+            "allow_scroll": not options.get("whiteboard"),
+            "color_only": options.get("color_only", False),
+        }
+        if options.get("recognition") == "barcode-copy":
+            editor_options["requested_output_label"] = self.tr("Scan and copy code", "识别并复制条码")
+        windows = detect_windows() if suggest_windows else ()
+        editor = CaptureEditor(snapshot, selection=selection, windows=windows, options=editor_options,
+                               history=self.workspace.regions())
+        if draft is not None:
+            from .update_restart_state import restore_canvas
+
+            restore_canvas(editor, draft)
+        self.editor = editor
+        self._connect_annotation_settings(editor)
+        editor.completed.connect(self.capture_completed)
+        editor.cancelled.connect(self.capture_cancelled)
+        editor.refresh_requested.connect(self.refresh_capture)
+        if hasattr(editor, "custom_output"):
+            editor.custom_output.connect(self.custom_output)
+        if hasattr(editor, "color_copied"):
+            editor.color_copied.connect(self.color_copied)
+        editor.show()
+        editor.activateWindow()
+        editor.setFocus()
 
     def _annotation_options(self):
         return {
@@ -664,7 +684,8 @@ class Application:
             done(code=1, error=message)
 
     @staticmethod
-    def add_clipboard_file(mime, path):
+    def file_clipboard_data(path):
+        mime = QMimeData()
         url = QUrl.fromLocalFile(str(path))
         mime.setUrls([url])
         if sys.platform == "win32":
@@ -672,16 +693,10 @@ class Application:
             mime.setText(str(path))
         elif sys.platform.startswith("linux"):
             mime.setData("x-special/gnome-copied-files", QByteArray(b"copy\n") + url.toEncoded())
+        return mime
 
-    def copy_image(self, image, *, saved_path=None):
+    def copy_image(self, image):
         mime = QMimeData()
-        if saved_path is not None:
-            self.add_clipboard_file(mime, saved_path)
-            # Lossy formats can change the pixels; paste what was actually saved.
-            if saved_path.suffix.lower() != ".png":
-                saved_image = QImage(str(saved_path))
-                if not saved_image.isNull():
-                    image = saved_image
         png = QByteArray(png_bytes(image))
         if sys.platform == "win32":
             # Clipboard readers such as Pillow try formats in the order we publish them.
@@ -710,6 +725,7 @@ class Application:
         order = ("file", "copy", "copy-file", "save", "print", "quick-save", "pin", "success", "external", "ocr-copy")
         steps.sort(key=lambda step: order.index(step[0]))
         silent = "silent" in outputs
+        explicit_clipboard = any(action in {"copy", "copy-file", "ocr-copy"} for action, _ in steps)
 
         def execute(index, result=""):
             if index == len(steps):
@@ -735,12 +751,13 @@ class Application:
                 else:
                     execute(index + 1, text or result)
 
-            self.output(image, action, rect, following, target, silent=silent, record=False, prompt_file=False)
+            self.output(image, action, rect, following, target, silent=silent, record=False, prompt_file=False,
+                        respect_copy_after_save=not explicit_clipboard)
 
         execute(0)
 
     def output(self, image, action, rect=None, done=None, target=None, *, silent=False, record=True, on_error=None,
-               dialog_parent=None, prompt_file=True):
+               dialog_parent=None, prompt_file=True, respect_copy_after_save=True):
         rect = QRect(rect) if rect is not None else QRect()
         text = ""
         try:
@@ -782,14 +799,18 @@ class Application:
                 raise ValueError(f"Unknown output: {action}")
             if target:
                 text = str(target)
-                copied_file = action in {"copy-file", "save-copy"} or self.workspace.get("copy_after_save")
-                if action == "copy-file":
-                    mime = QMimeData()
-                    self.add_clipboard_file(mime, target)
-                    self.qt.clipboard().setMimeData(mime)
-                elif copied_file:
-                    self.copy_image(image, saved_path=target)
-                self.report_saved_file(target, copied_file=copied_file, silent=silent or action == "silent")
+                copied_file = action == "copy-file"
+                copied_image = not copied_file and (
+                    action == "save-copy" or (respect_copy_after_save and self.workspace.get("copy_after_save"))
+                )
+                if copied_file:
+                    self.qt.clipboard().setMimeData(self.file_clipboard_data(target))
+                elif copied_image:
+                    # When a different encoding changes pixels, paste the stored version.
+                    saved_image = QImage(str(target)) if target.suffix.lower() != ".png" else image
+                    self.copy_image(image if saved_image.isNull() else saved_image)
+                self.report_saved_file(target, copied_file=copied_file, copied_image=copied_image,
+                                       silent=silent or action == "silent")
             if record:
                 self._record_output(image, rect, action, already_saved=bool(target))
         except (OSError, RuntimeError, ValueError) as error:
@@ -804,7 +825,7 @@ class Application:
         if done:
             done(code=0, text=text)
 
-    def report_saved_file(self, path, *, copied_file=False, silent=False):
+    def report_saved_file(self, path, *, copied_file=False, copied_image=False, silent=False):
         path = Path(path)
         try:
             self.workspace.remember_export(path)
@@ -818,6 +839,8 @@ class Application:
         if not silent:
             if copied_file:
                 message = self.tr(f"File copied to clipboard. Saved to {path}", f"文件已复制到剪贴板。保存位置为 {path}")
+            elif copied_image:
+                message = self.tr(f"Image copied to clipboard. Saved to {path}", f"图片已复制到剪贴板。保存位置为 {path}")
             else:
                 message = self.tr(f"Saved to {path}", f"已保存至 {path}")
             self.notify(message, success=True)
@@ -1036,23 +1059,7 @@ class Application:
                 self.save_pin(pin_id)
                 self.rebuild_tray()
         elif action in {"annotate", "crop"}:
-            from .editor import Annotation, ImageEditor
-
-            cropped = action == "crop"
-            annotations = () if cropped else tuple(
-                Annotation(**(item | {"points": tuple(map(tuple, item["points"]))}))
-                for item in window.state.get("annotations", [])
-            )
-            dialog = ImageEditor(window.view if cropped else window.image,
-                                 parent=window, locale=self.locale, annotations=annotations,
-                                 options=self._annotation_options())
-            self._connect_annotation_settings(dialog.canvas)
-            if cropped:
-                dialog.activate_crop()
-            dialog.applied.connect(lambda updated: self.update_pin_image(
-                pin_id, dialog.result_base, [asdict(annotation) for annotation in dialog.annotations], cropped=cropped
-            ))
-            self.keep_dialog(dialog)
+            self.open_pin_editor(pin_id, cropped=action == "crop")
         elif action == "replace":
             mime = self.qt.clipboard().mimeData()
             images = clipboard_images(mime)
@@ -1070,6 +1077,27 @@ class Application:
         else:
             self.output(window.view, action, dialog_parent=window if action == "save" else None)
         self.update_lists()
+
+    def open_pin_editor(self, pin_id, *, cropped=False, draft_image=None):
+        from .editor import Annotation, ImageEditor
+
+        window = self.pin_windows[pin_id]
+        annotations = () if cropped or draft_image is not None else tuple(
+            Annotation(**(item | {"points": tuple(map(tuple, item["points"]))}))
+            for item in window.state.get("annotations", [])
+        )
+        image = draft_image if draft_image is not None else window.view if cropped else window.image
+        dialog = ImageEditor(image, parent=window, locale=self.locale, annotations=annotations,
+                             options=self._annotation_options())
+        dialog.restart_source = {"pin_id": pin_id, "cropped": cropped}
+        self._connect_annotation_settings(dialog.canvas)
+        if cropped:
+            dialog.activate_crop()
+        dialog.applied.connect(lambda updated: self.update_pin_image(
+            pin_id, dialog.result_base, [asdict(annotation) for annotation in dialog.annotations], cropped=cropped
+        ))
+        self.keep_dialog(dialog)
+        return dialog
 
     def update_pin_image(self, pin_id, updated, annotations, *, cropped=False):
         window = self.pin_windows.get(pin_id)
@@ -1342,16 +1370,21 @@ class Application:
         if image.isNull():
             return
         if action == "preview":
-            from .editor import ImageEditor
-
-            dialog = ImageEditor(image, locale=self.locale, options=self._annotation_options(),
-                                 apply_text=self.tr("Create floating pin", "新建悬浮贴图"))
-            dialog.setWindowTitle(self.tr("Screenshot history preview", "截图历史预览"))
-            self._connect_annotation_settings(dialog.canvas)
-            dialog.applied.connect(lambda updated: self.open_pin(updated))
-            self.keep_dialog(dialog)
+            self.open_history_preview(image)
         else:
             self.output(image, action)
+
+    def open_history_preview(self, image):
+        from .editor import ImageEditor
+
+        dialog = ImageEditor(image, locale=self.locale, options=self._annotation_options(),
+                             apply_text=self.tr("Create floating pin", "新建悬浮贴图"))
+        dialog.restart_source = {}
+        dialog.setWindowTitle(self.tr("Screenshot history preview", "截图历史预览"))
+        self._connect_annotation_settings(dialog.canvas)
+        dialog.applied.connect(lambda updated: self.open_pin(updated))
+        self.keep_dialog(dialog)
+        return dialog
 
     def keep_dialog(self, dialog):
         self.dialogs.add(dialog)
@@ -1408,6 +1441,9 @@ class Application:
             else:
                 self.notify(message, success=True)
             return
+        self.show_recognition_result(text, result_parent)
+
+    def show_recognition_result(self, text, result_parent=None):
         if result_parent is None and self.dashboard.isVisible():
             result_parent = self.dashboard
         dialog = QDialog(result_parent)
@@ -1418,6 +1454,7 @@ class Application:
         layout = QVBoxLayout(dialog)
         edit = QTextEdit()
         edit.setPlainText(text)
+        dialog.restart_text_editor = edit
         layout.addWidget(edit)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         copy = buttons.addButton(self.tr("Copy text", "复制文字"), QDialogButtonBox.ButtonRole.ActionRole)
@@ -1425,6 +1462,7 @@ class Application:
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         self.keep_dialog(dialog)
+        return dialog
 
     def raise_scroll_capture(self):
         dialog = self.scroll_dialog
@@ -1513,6 +1551,7 @@ class Application:
             if done and result == QDialog.DialogCode.Rejected:
                 done(code=1, error="Scrolling capture cancelled.")
 
+        dialog.restart_scroll = lambda: (current, region, restore_dashboard, tuple(hidden_pins))
         add.clicked.connect(next_frame)
         save.clicked.connect(lambda: finish("save"))
         copy.clicked.connect(lambda: finish("save-copy"))
@@ -1767,6 +1806,48 @@ class Application:
         for key, flags in ((0x11, 0), (0x56, 0), (0x56, 2), (0x11, 2)):
             user32.keybd_event(key, 0, flags, 0)
 
+    def check_updates(self):
+        from .update_dialog import UpdateDialog
+        from .update_install import current_installation_kind
+
+        if self.update_dialog is not None:
+            self.update_dialog.showNormal()
+            self.update_dialog.raise_()
+            self.update_dialog.activateWindow()
+            return
+        dialog = UpdateDialog(self.tr, install_kind=current_installation_kind())
+        self.update_dialog = dialog
+        dialog.setWindowIcon(app_icon())
+        dialog.finished.connect(lambda: setattr(self, "update_dialog", None))
+        dialog.install_requested.connect(self.install_update)
+        self.keep_dialog(dialog)
+        dialog.activateWindow()
+        dialog.check_for_updates()
+
+    def install_update(self, release, asset, path, digest):
+        from .update_install import start_update
+        from .update_restart_state import RestartStateError, discard_restart_state, save_restart_state
+
+        dialog = self.update_dialog
+        try:
+            save_restart_state(self)
+        except (RestartStateError, OSError, ValueError) as error:
+            dialog.install_failed(str(error))
+            return
+        try:
+            start_update(self.workspace.directory, release, asset, path, digest)
+        except (OSError, ValueError, RuntimeError):
+            try:
+                discard_restart_state(self)
+            except OSError:
+                pass
+            dialog.install_failed(self.tr(
+                "Couldn’t start the installer. Your work is still open. You can retry or open the download folder.",
+                "无法启动安装。当前内容仍打开，可以重试或打开下载位置。",
+            ))
+            return
+        self.qt.quit()
+
     def help(self):
         shortcuts = self.workspace.get("hotkeys")
         capture = shortcuts.get("capture") if self.hotkeys_enabled and "capture" not in self.hotkeys.unavailable else None
@@ -1776,16 +1857,18 @@ class Application:
         paste_hint = self.tr(f"Press {paste} to pin clipboard content.", f"按 {paste} 悬浮剪贴板内容。") if paste else self.tr(
             "Choose Pin clipboard content from the main window or tray.", "可从主窗口或托盘选择「悬浮剪贴板内容」。")
         QMessageBox.information(
-            self.dashboard, "Snaploom",
+            self.dashboard, f"Snaploom v{VERSION}",
             "\n".join((capture_hint, paste_hint, self.tr(
-                "On the screenshot canvas, Enter confirms the selection or copies it once selected. "
+                "On the screenshot canvas, Enter confirms the selection, then saves it and copies the image. "
                 "Restore last hidden pin brings back a pin you hid earlier. Change shortcuts in Settings.",
-                "在截图画布中，回车可确认框选或复制已确认的选区。"
+                "在截图画布中，回车可确认框选，或保存已确认的选区并复制图片。"
                 "「恢复最近隐藏的贴图」可重新显示收起的小窗。可在设置中修改快捷键。",
             ))),
         )
 
     def shutdown(self):
+        if self.update_dialog is not None:
+            self.update_dialog.reject()
         self.hotkeys.close()
         if self.mouse_hook:
             self.mouse_hook.stop()
@@ -1806,9 +1889,16 @@ class HookPair:
 
 
 def smoke_test(qt, ocr=False):
+    from PySide6.QtNetwork import QSslSocket
+
     from .capture import Snapshot
     from .editor import CaptureEditor
+    from .update_install import HELPER_NAME
 
+    assert QSslSocket.supportsSsl(), "Secure update connections are unavailable"
+    if getattr(sys, "frozen", False):
+        helper = Path(sys._MEIPASS) / HELPER_NAME
+        assert helper.is_file() and os.access(helper, os.X_OK), "Packaged updater is unavailable"
     with tempfile.TemporaryDirectory(prefix="snaploom-smoke-") as directory:
         app = Application(qt, Path(directory), testing=True)
         try:
@@ -1858,6 +1948,8 @@ def smoke_recognition():
 
 def main(values=None):
     data = arguments(sys.argv[1:] if values is None else values)
+    if data.get("resume_update"):
+        os.environ["SNAPLOOM_DATA_DIR"] = str(Path(data["resume_update"]).resolve())
     qt = QApplication([sys.argv[0]])
     qt.setApplicationName("Snaploom")
     qt.setApplicationDisplayName("Snaploom")
@@ -1867,6 +1959,16 @@ def main(values=None):
     qt.setWindowIcon(app_icon())
     if data["smoke_test"] or data["smoke_test_ocr"]:
         return smoke_test(qt, data["smoke_test_ocr"])
+    from .update_install import finish_handoff, process_running, read_handoff
+
+    location = data_directory()
+    handoff = read_handoff(location)
+    if handoff.get("status") == "installing" and process_running(handoff["pid"]):
+        if not data.get("command") and not data.get("background"):
+            chinese = QLocale.system().language() == QLocale.Language.Chinese
+            QMessageBox.information(None, "Snaploom", "正在安装更新，完成后会自动重启。" if chinese
+                                    else "Snaploom is installing an update and will restart when it is ready.")
+        return 1
     result = send_to_instance(data)
     if result is not None:
         return result
@@ -1892,7 +1994,6 @@ def main(values=None):
                 time.sleep(0.1)
         print("Could not start the Snaploom background application.", file=sys.stderr)
         return 2
-    location = data_directory()
     location.mkdir(parents=True, exist_ok=True)
     lock = QLockFile(str(location / "instance.lock"))
     if not lock.tryLock(0):
@@ -1912,5 +2013,37 @@ def main(values=None):
         QTimer.singleShot(0, lambda: application.command(data, print_result))
         QTimer.singleShot(int(data["block"] * 1000), lambda: qt.exit(2))
     else:
-        QTimer.singleShot(0, lambda: application.command(data))
+        def open_workspace():
+            from .update_restart_state import RestartStateError, restore_restart_state
+
+            restored = False
+            restore_error = None
+            if handoff or not data.get("command"):
+                try:
+                    restored = restore_restart_state(application)
+                except RestartStateError as error:
+                    restore_error = str(error)
+            if not restored or data.get("command"):
+                application.command(data)
+            if restore_error:
+                application.notify(restore_error, error=True)
+            if handoff:
+                if not restore_error and handoff["status"] == "installed":
+                    application.status(application.tr(f"Updated to Snaploom v{VERSION}.", f"已更新到 Snaploom v{VERSION}。"))
+                elif not restore_error:
+                    application.notify(application.tr(
+                        "The update did not finish. Your recovered work is available.",
+                        "更新未完成，已尝试恢复此前的工作。",
+                    ), error=True)
+
+                def cleanup(retries=8):
+                    try:
+                        if not finish_handoff(location, handoff) and retries:
+                            QTimer.singleShot(750, lambda: cleanup(retries - 1))
+                    except OSError:
+                        pass
+
+                cleanup()
+
+        QTimer.singleShot(0, open_workspace)
     return qt.exec()
