@@ -1,0 +1,35 @@
+name: Windows Chromium clipboard probe
+
+on:
+  push:
+    branches: [codex/clipboard-browser-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  paste:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      QT_QPA_PLATFORM: windows
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: v1.0.22
+          path: previous-release
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set up Chromium and native Qt clipboard reader
+        run: python -m pip install PySide6-Essentials==6.10.3 playwright==1.58.0
+      - name: Paste into a rich chat input in headful Chromium
+        run: python tests/probe_browser_clipboard.py previous-release . build/browser-clipboard-results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chromium-clipboard-evidence
+          path: build/browser-clipboard-results
