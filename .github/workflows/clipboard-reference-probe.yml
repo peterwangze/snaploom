@@ -1,0 +1,42 @@
+name: Windows clipboard reference probe
+
+on:
+  push:
+    branches: [codex/clipboard-reference-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      QT_QPA_PLATFORM: windows
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install probe dependencies
+        run: python -m pip install PySide6-Essentials==6.10.3 Pillow==13.0.0
+      - name: Verify the official Snipaste portable download and compare copy behavior
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'Snipaste-2.11.3-x64.zip'
+          $portable = Join-Path $env:RUNNER_TEMP 'Snipaste-reference'
+          Invoke-WebRequest -Uri 'https://download.snipaste.com/archives/Snipaste-2.11.3-x64.zip' -OutFile $archive -TimeoutSec 60
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne 'CBF572E18A79C93F9A573BBCCAB2ED8566141759A0C656C768932F0FEDF94189') {
+            throw 'Snipaste archive does not match the pinned file from the official site.'
+          }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA1).Hash -ne '850BD133114A6B24156D19E41A06F057555B21B5') {
+            throw 'Snipaste archive does not match the published vendor checksum.'
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $portable
+          $exe = Get-ChildItem -LiteralPath $portable -Recurse -File -Filter 'Snipaste.exe' | Select-Object -First 1
+          if ((Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA1).Hash -ne 'F6E14360D0F5AF8E4DD93B798F0B8C33B5C23430') {
+            throw 'Snipaste executable does not match the published vendor checksum.'
+          }
+          python -m tests.probe_clipboard_reference $exe.FullName
