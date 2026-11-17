@@ -55,7 +55,7 @@ def inspect_clipboard(expected_file):
     if isinstance(source, Image.Image):
         result["consumer"] = source.format
     elif isinstance(source, list):
-        exact_fixture = bool(expected_file) and [Path(path) for path in source] == [Path(expected_file)]
+        exact_fixture = bool(expected_file) and [Path(path).resolve() for path in source] == [Path(expected_file).resolve()]
         result.update(consumer="files", exact_fixture=exact_fixture)
         source = Image.open(expected_file) if exact_fixture else None
     if source is not None:
@@ -88,7 +88,7 @@ def compare(executable):
                 raise RuntimeError(bytes(process.readAllStandardError()).decode(errors="replace"))
             result = json.loads(bytes(process.readAllStandardOutput()))
             print(label, json.dumps(result), flush=True)
-            assert result["sample"] == list(COLOR), f"{label} did not provide the synthetic test pixels"
+            assert result.get("sample") == list(COLOR), f"{label} did not provide the synthetic test pixels"
             return result
         finally:
             if process.state() != QProcess.ProcessState.NotRunning:
@@ -96,7 +96,7 @@ def compare(executable):
                 process.waitForFinished(2000)
 
     with TemporaryDirectory(prefix="clipboard-reference-") as temporary:
-        root = Path(temporary)
+        root = Path(temporary).resolve()
         original = Application(qt, root / "snaploom", testing=True)
         original.workspace.set("save_folder", str(root / "exports"))
         original.workspace.set("save_pattern", "QA synthetic image")
@@ -126,9 +126,9 @@ def compare(executable):
                 assert sample == COLOR, f"Hosted screen does not show the synthetic fixture: {sample}"
 
                 sequence = user.GetClipboardSequenceNumber()
-                deadline = monotonic() + 15
                 for _ in range(3):
                     subprocess.run([executable, config, "snip", "--full", "-o", "clipboard"], cwd=root, timeout=5)
+                    deadline = monotonic() + 5
                     while monotonic() < deadline and user.GetClipboardSequenceNumber() == sequence:
                         QTest.qWait(50)
                     if user.GetClipboardSequenceNumber() != sequence:
