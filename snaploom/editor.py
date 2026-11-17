@@ -490,7 +490,8 @@ class CaptureEditor(QWidget):
             description = self._label("Drag to select an area, or press Space to start and finish keyboard selection. ",
                                       "拖动选择区域，或按空格开始和结束键盘框选。")
             if self.default_action == "save-copy":
-                description += self._label("Press Enter to save and copy the selected area.", "按回车保存并复制选区。")
+                description += self._label("Press Enter to save the selected area and copy the image.",
+                                           "按回车保存选区并复制图片。")
             elif self.default_action == "copy":
                 description += self._label("Press Enter to copy the selected area.", "按回车复制选区。")
             else:
@@ -755,6 +756,9 @@ class CaptureEditor(QWidget):
                     actions, title, lambda: self._complete(self.default_action),
                     shortcut=" / ".join(filter(None, (self._shortcut_label("copy"), "Enter"))),
                 )
+                if self.default_action == "save-copy":
+                    primary.setToolTip(primary.toolTip() + "\n" + self._label(
+                        "Save to the default folder and copy the image", "保存到默认目录，并复制图片"))
                 self._button(actions, self._label("Pin", "贴图"), lambda: self._complete("pin"), shortcut=self._shortcut_label("pin"))
                 self._button(actions, self._label("Save As…", "另存为…"), lambda: self._complete("save"), shortcut=self._shortcut_label("save"))
             primary.setObjectName("copyCapture")

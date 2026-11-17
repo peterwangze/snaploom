@@ -236,6 +236,9 @@ def acceptance(old_package, new_package, helper):
             baseline_log = directory / "baseline.log"
             try:
                 snapshot, pin_id = fixtures(qt, profile, directory)
+                # A baseline that already supports recovery would consume the fixture
+                # at startup. Publish it only after that process is running.
+                staged_snapshot = snapshot.replace(directory / "Restart Drafts.zip")
                 executable, cli = install_baseline(old_package, directory, env)
                 portable = old_package.name.endswith((".zip", ".tar.gz"))
                 portable_note = executable.parent / "User file kept with their portable app.txt"
@@ -248,18 +251,23 @@ def acceptance(old_package, new_package, helper):
                     baseline = subprocess.Popen([str(executable), "--background"], env=env,
                                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
                 old_pid = wait_until(lambda: wait_for_old_app(lock, baseline), 25, "The baseline did not start.")
+                staged_snapshot.replace(snapshot)
                 release, asset, digest = release_asset(new_package, version)
+                runtime = executable.parent.parent / "Frameworks" if sys.platform == "darwin" else executable.parent / "_internal"
+                actual_helper = runtime / HELPER_NAME
+                if not actual_helper.is_file():
+                    actual_helper = helper
                 with (
                     patch.object(snaploom, "VERSION", baseline_version),
                     patch.object(sys, "executable", str(executable)),
                     patch.object(sys, "frozen", True, create=True),
-                    patch.object(sys, "_MEIPASS", str(helper.parent), create=True),
+                    patch.object(sys, "_MEIPASS", str(actual_helper.parent), create=True),
                     patch("snaploom.update_install.os.getpid", return_value=old_pid),
                 ):
                     start_update(profile, release, asset, new_package, digest)
                 assert read_handoff(profile).get("status") == "installing"
                 assert lock_pid(lock) == old_pid, "The helper replaced the application while it was running"
-                run([cli, "quit"], env, timeout=20)
+                assert send_to_instance({"command": "quit", "block": 3}) == 0
                 assert baseline.wait(20) == 0, "The previous release did not quit cleanly"
                 new_pid = wait_until(
                     lambda: wait_for_restarted_app(profile, lock, old_pid, snapshot),

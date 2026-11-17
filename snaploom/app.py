@@ -684,7 +684,8 @@ class Application:
             done(code=1, error=message)
 
     @staticmethod
-    def add_clipboard_file(mime, path):
+    def file_clipboard_data(path):
+        mime = QMimeData()
         url = QUrl.fromLocalFile(str(path))
         mime.setUrls([url])
         if sys.platform == "win32":
@@ -692,16 +693,10 @@ class Application:
             mime.setText(str(path))
         elif sys.platform.startswith("linux"):
             mime.setData("x-special/gnome-copied-files", QByteArray(b"copy\n") + url.toEncoded())
+        return mime
 
-    def copy_image(self, image, *, saved_path=None):
+    def copy_image(self, image):
         mime = QMimeData()
-        if saved_path is not None:
-            self.add_clipboard_file(mime, saved_path)
-            # Lossy formats can change the pixels; paste what was actually saved.
-            if saved_path.suffix.lower() != ".png":
-                saved_image = QImage(str(saved_path))
-                if not saved_image.isNull():
-                    image = saved_image
         png = QByteArray(png_bytes(image))
         if sys.platform == "win32":
             # Clipboard readers such as Pillow try formats in the order we publish them.
@@ -730,6 +725,7 @@ class Application:
         order = ("file", "copy", "copy-file", "save", "print", "quick-save", "pin", "success", "external", "ocr-copy")
         steps.sort(key=lambda step: order.index(step[0]))
         silent = "silent" in outputs
+        explicit_clipboard = any(action in {"copy", "copy-file", "ocr-copy"} for action, _ in steps)
 
         def execute(index, result=""):
             if index == len(steps):
@@ -755,12 +751,13 @@ class Application:
                 else:
                     execute(index + 1, text or result)
 
-            self.output(image, action, rect, following, target, silent=silent, record=False, prompt_file=False)
+            self.output(image, action, rect, following, target, silent=silent, record=False, prompt_file=False,
+                        respect_copy_after_save=not explicit_clipboard)
 
         execute(0)
 
     def output(self, image, action, rect=None, done=None, target=None, *, silent=False, record=True, on_error=None,
-               dialog_parent=None, prompt_file=True):
+               dialog_parent=None, prompt_file=True, respect_copy_after_save=True):
         rect = QRect(rect) if rect is not None else QRect()
         text = ""
         try:
@@ -802,14 +799,18 @@ class Application:
                 raise ValueError(f"Unknown output: {action}")
             if target:
                 text = str(target)
-                copied_file = action in {"copy-file", "save-copy"} or self.workspace.get("copy_after_save")
-                if action == "copy-file":
-                    mime = QMimeData()
-                    self.add_clipboard_file(mime, target)
-                    self.qt.clipboard().setMimeData(mime)
-                elif copied_file:
-                    self.copy_image(image, saved_path=target)
-                self.report_saved_file(target, copied_file=copied_file, silent=silent or action == "silent")
+                copied_file = action == "copy-file"
+                copied_image = not copied_file and (
+                    action == "save-copy" or (respect_copy_after_save and self.workspace.get("copy_after_save"))
+                )
+                if copied_file:
+                    self.qt.clipboard().setMimeData(self.file_clipboard_data(target))
+                elif copied_image:
+                    # When a different encoding changes pixels, paste the stored version.
+                    saved_image = QImage(str(target)) if target.suffix.lower() != ".png" else image
+                    self.copy_image(image if saved_image.isNull() else saved_image)
+                self.report_saved_file(target, copied_file=copied_file, copied_image=copied_image,
+                                       silent=silent or action == "silent")
             if record:
                 self._record_output(image, rect, action, already_saved=bool(target))
         except (OSError, RuntimeError, ValueError) as error:
@@ -824,7 +825,7 @@ class Application:
         if done:
             done(code=0, text=text)
 
-    def report_saved_file(self, path, *, copied_file=False, silent=False):
+    def report_saved_file(self, path, *, copied_file=False, copied_image=False, silent=False):
         path = Path(path)
         try:
             self.workspace.remember_export(path)
@@ -838,6 +839,8 @@ class Application:
         if not silent:
             if copied_file:
                 message = self.tr(f"File copied to clipboard. Saved to {path}", f"文件已复制到剪贴板。保存位置为 {path}")
+            elif copied_image:
+                message = self.tr(f"Image copied to clipboard. Saved to {path}", f"图片已复制到剪贴板。保存位置为 {path}")
             else:
                 message = self.tr(f"Saved to {path}", f"已保存至 {path}")
             self.notify(message, success=True)
@@ -1856,9 +1859,9 @@ class Application:
         QMessageBox.information(
             self.dashboard, f"Snaploom v{VERSION}",
             "\n".join((capture_hint, paste_hint, self.tr(
-                "On the screenshot canvas, Enter confirms the selection, then saves and copies it. "
+                "On the screenshot canvas, Enter confirms the selection, then saves it and copies the image. "
                 "Restore last hidden pin brings back a pin you hid earlier. Change shortcuts in Settings.",
-                "在截图画布中，回车可确认框选，或保存并复制已确认的选区。"
+                "在截图画布中，回车可确认框选，或保存已确认的选区并复制图片。"
                 "「恢复最近隐藏的贴图」可重新显示收起的小窗。可在设置中修改快捷键。",
             ))),
         )

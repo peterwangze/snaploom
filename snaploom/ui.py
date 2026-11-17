@@ -24,7 +24,7 @@ HOTKEY_ZH = {
     "repeat": "重复上次区域", "click_through": "切换贴图鼠标穿透", "active": "截取当前窗口",
 }
 EDITOR_ACTIONS = {
-    "copy": ("Save and copy screenshot", "保存并复制截图"), "save": ("Save As…", "另存为…"),
+    "copy": ("Save and copy image", "保存并复制图片"), "save": ("Save As…", "另存为…"),
     "pin": ("Pin screenshot", "悬浮截图"), "quick-save": ("Quick save", "快速保存"),
     "copy-file": ("Save As and Copy File…", "另存为并复制文件…"), "refresh": ("Refresh screenshot", "刷新截图"),
     "color": ("Copy pixel color", "复制像素颜色"), "undo": ("Undo step", "撤销一步"),
@@ -405,7 +405,7 @@ class Preferences(QDialog):
         self.fields = {}
         for key, en, zh in (
             ("auto_save", "Automatically save other completed captures", "自动保存其他已完成的截图"),
-            ("copy_after_save", "Copy the file after Save As or Quick Save", "另存为或快速保存后也复制文件"),
+            ("copy_after_save", "Copy the image after Save As or Quick Save", "另存为或快速保存后也复制图片"),
             ("include_cursor", "Include the cursor in screenshots", "截图包含鼠标指针"),
             ("restore_pins", "Reopen visible pins on startup", "启动时重新显示上次可见的贴图"),
             ("hide_pins_on_capture", "Hide pins during capture", "截图时隐藏贴图"),

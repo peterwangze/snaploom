@@ -1,4 +1,3 @@
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -113,6 +112,15 @@ class UserJourneyTests(unittest.TestCase):
         tabs = self.application.dashboard.tabs
         self.click(tabs.tabBar(), tabs.tabBar().tabRect(index).center())
         self.assertEqual(tabs.currentIndex(), index)
+
+    def copied_image(self):
+        mime = self.qt.clipboard().mimeData()
+        self.assertIsNotNone(mime)
+        self.assertTrue(mime.hasImage())
+        self.assertTrue(mime.hasFormat("image/png"))
+        self.assertFalse(mime.hasUrls())
+        self.assertFalse(mime.hasText())
+        return self.qt.clipboard().image()
 
     def capture_menu_action(self, editor, en, zh):
         more = next(button for button in editor.toolbar.findChildren(QToolButton) if button.menu() is not None)
@@ -335,11 +343,12 @@ class UserJourneyTests(unittest.TestCase):
         self.click(self.button(editor.toolbar, "Save and Copy", "保存并复制", QToolButton))
         self.assertIsNone(app.editor)
         self.assertTrue(app.dashboard.isVisible())
-        copied = self.qt.clipboard().image()
+        copied = self.copied_image()
         self.assertEqual(copied.size(), self.selection.size())
         self.assertNotEqual(copied.pixelColor(20, 30), QColor("#f0f4f8"))
         path, = self.folder.glob("*.png")
         self.assertEqual(QImage(str(path)).pixelColor(20, 30), copied.pixelColor(20, 30))
+        self.assertEqual([path for path, _ in app.workspace.recent_exports()], [path])
         self.select_tab(1)
         self.assertEqual(app.dashboard.history_list.count(), 1)
         self.click(self.button(app.dashboard, "Preview", "预览"))
@@ -384,7 +393,7 @@ class UserJourneyTests(unittest.TestCase):
         self.assertEqual(history.count(), 2)
         self.assertTrue(app.workspace.history_image(selected_id).isNull())
 
-    def test_save_cancel_keeps_selection_and_second_attempt_copies_the_chosen_file(self):
+    def test_save_cancel_keeps_selection_and_second_attempt_copies_the_saved_image(self):
         app = self.application
         app.workspace.set("copy_after_save", True)
         default_folder = self.folder / "Default saves"
@@ -413,9 +422,9 @@ class UserJourneyTests(unittest.TestCase):
         self.assertEqual(exported.pixelColor(0, 0), QColor("#f0f4f8"))
         self.assertEqual(list(self.folder.glob("*.png")), [path])
         self.assertEqual(list(default_folder.iterdir()), [])
-        mime = self.qt.clipboard().mimeData()
-        self.assertEqual([Path(url.toLocalFile()) for url in mime.urls()], [path])
-        self.assertEqual(self.qt.clipboard().image().pixelColor(0, 0), exported.pixelColor(0, 0))
+        copied = self.copied_image()
+        self.assertEqual(copied.size(), exported.size())
+        self.assertEqual(copied.pixelColor(0, 0), exported.pixelColor(0, 0))
         self.assertEqual(app.workspace.regions(), [self.selection])
 
     def test_history_and_pin_copy_stay_image_only(self):
@@ -424,20 +433,19 @@ class UserJourneyTests(unittest.TestCase):
         app.update_lists()
         self.select_tab(1)
         self.click(self.button(app.dashboard, "Copy", "复制"))
-        self.assertEqual(self.qt.clipboard().image().size(), self.image.size())
-        self.assertFalse(self.qt.clipboard().mimeData().hasUrls())
+        self.assertEqual(self.copied_image().size(), self.image.size())
 
         self.click(self.button(app.dashboard, "Pin", "贴图"))
         pin, = app.pin_windows.values()
         self.qt.clipboard().clear()
         QTest.keyClick(pin, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
-        self.assertEqual(self.qt.clipboard().image().size(), self.image.size())
-        self.assertFalse(self.qt.clipboard().mimeData().hasUrls())
+        self.assertEqual(self.copied_image().size(), self.image.size())
         self.assertEqual(list(self.folder.glob("*.png")), [])
         self.assertEqual(app.workspace.recent_exports(), [])
 
     def test_quick_save_reports_path_and_remembers_save_location_after_restart(self):
         app = self.application
+        app.workspace.set("copy_after_save", True)
         self.assertFalse(app.dashboard.save_location_button.isVisible())
         editor = self.open_capture()
         self.select_region(editor)
@@ -445,7 +453,9 @@ class UserJourneyTests(unittest.TestCase):
             self.capture_menu_action(editor, "Quick save", "快速保存")
         choose.assert_not_called()
         quick_save, = self.folder.glob("*.png")
-        self.assertEqual(QImage(str(quick_save)).size(), self.selection.size())
+        saved = QImage(str(quick_save))
+        self.assertEqual(saved.size(), self.selection.size())
+        self.assertEqual(self.copied_image().convertToFormat(saved.format()), saved)
         location = self.button(app.dashboard, "Open last save location", "打开最近保存位置")
         self.assertIn(str(quick_save), app.dashboard.status.text())
         self.assertEqual(location.toolTip(), str(quick_save))
@@ -593,8 +603,10 @@ class UserJourneyTests(unittest.TestCase):
             raise failures[0]
         [(name, _)] = selections
         self.assertEqual(Path(name), target)
-        link, = self.qt.clipboard().mimeData().urls()
+        mime = self.qt.clipboard().mimeData()
+        link, = mime.urls()
         self.assertEqual(Path(link.toLocalFile()), target)
+        self.assertFalse(mime.hasImage())
         self.assertEqual(QImage(str(target)).size(), self.selection.size())
         self.assertIn(str(target), app.dashboard.status.text())
         self.assertEqual(app.workspace.regions(), [self.selection])
@@ -628,10 +640,9 @@ class UserJourneyTests(unittest.TestCase):
         self.assertEqual(Path(response[0]["text"]), path)
         self.assertIsNone(app.editor)
         saved = QImage(str(path))
-        copied = self.qt.clipboard().image()
+        copied = self.copied_image()
         self.assertEqual(saved.size(), self.selection.size())
         self.assertEqual(saved.pixelColor(25, 30), copied.pixelColor(25, 30))
-        self.assertFalse(self.qt.clipboard().mimeData().hasUrls())
         self.assertEqual(list(self.folder.glob("*.png")), [path])
         self.assertEqual(app.workspace.regions(), [self.selection])
 
@@ -643,8 +654,7 @@ class UserJourneyTests(unittest.TestCase):
         app.command(command, lambda **result: response.append(result))
         self.until(lambda: bool(response), "Scripted capture did not report completion.")
         self.assertEqual(response[0]["code"], 0)
-        self.assertEqual(self.qt.clipboard().image().size(), self.selection.size())
-        self.assertFalse(self.qt.clipboard().mimeData().hasUrls())
+        self.assertEqual(self.copied_image().size(), self.selection.size())
         self.assertEqual(list(self.folder.glob("*.png")), [])
         self.assertEqual(app.workspace.recent_exports(), [])
 
@@ -674,7 +684,7 @@ class UserJourneyTests(unittest.TestCase):
         editor = self.open_capture()
         QTest.keyClick(editor, Qt.Key.Key_Escape)
 
-    def test_tray_capture_keyboard_selection_saves_once_and_copies_the_image_and_file(self):
+    def test_tray_capture_keyboard_selection_saves_once_and_copies_the_image(self):
         app = self.application
         folder = self.folder / "屏幕 截图"
         app.workspace.set("save_folder", str(folder))
@@ -697,15 +707,10 @@ class UserJourneyTests(unittest.TestCase):
         self.assertIsNone(app.editor)
         path, = folder.glob("*.png")
         saved = QImage(str(path))
-        copied = self.qt.clipboard().image()
+        copied = self.copied_image()
         self.assertEqual(copied.size(), region.size())
         self.assertEqual(saved.size(), copied.size())
         self.assertEqual(saved.pixelColor(5, 5), copied.pixelColor(5, 5))
-        mime = self.qt.clipboard().mimeData()
-        self.assertEqual([Path(url.toLocalFile()) for url in mime.urls()], [path])
-        if sys.platform == "win32":
-            self.assertIn("text/plain", mime.formats())
-            self.assertEqual(mime.text(), str(path))
         self.assertEqual([path for path, _ in app.workspace.recent_exports()], [path])
         self.assertIn(str(path), app.dashboard.status.text())
         self.assertEqual(app.workspace.regions(), [region])
@@ -1246,12 +1251,11 @@ class UserJourneyTests(unittest.TestCase):
         self.click(self.button(dialog, "Add next frame", "添加下一帧"))
         self.until(dialog.isVisible, "Scrolling capture dialog did not return after stitching.")
         self.click(self.button(dialog, "Save and Copy", "保存并复制"))
-        copied = self.qt.clipboard().image()
+        copied = self.copied_image()
         self.assertEqual((copied.width(), copied.height()), (160, 215))
         self.assertEqual(copied.pixelColor(70, 195), document.pixelColor(70, 195))
         path, = self.folder.glob("*.png")
         self.assertEqual(QImage(str(path)).pixelColor(70, 195), copied.pixelColor(70, 195))
-        self.assertEqual([Path(url.toLocalFile()) for url in self.qt.clipboard().mimeData().urls()], [path])
         self.assertTrue(self.application.dashboard.isVisible())
 
 

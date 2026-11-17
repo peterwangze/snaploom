@@ -79,6 +79,15 @@ class DashboardEntryPointTests(unittest.TestCase):
         self.click_at(tabs.tabBar(), tabs.tabBar().tabRect(index).center())
         self.assertEqual(tabs.currentIndex(), index)
 
+    def copied_image(self):
+        mime = self.qt.clipboard().mimeData()
+        self.assertIsNotNone(mime)
+        self.assertTrue(mime.hasImage())
+        self.assertTrue(mime.hasFormat("image/png"))
+        self.assertFalse(mime.hasUrls())
+        self.assertFalse(mime.hasText())
+        return self.qt.clipboard().image()
+
     def click_pin_row(self, pin_id):
         pins = self.app.dashboard.pin_list
         item = next(pins.item(row) for row in range(pins.count())
@@ -199,20 +208,19 @@ class DashboardEntryPointTests(unittest.TestCase):
                 with self.subTest(notifications=enabled):
                     if enabled:
                         self.app.workspace.set("show_success_notifications", True)
+                    prior_files = set(save_folder.glob("*.png"))
                     editor = self.open_capture("All displays", "所有屏幕", desktop)
                     with patch.object(QFileDialog, "getSaveFileName") as choose:
                         self.click_button("Save and Copy", "保存并复制", parent=editor.toolbar, widget=QToolButton)
                     choose.assert_not_called()
-                    copied = self.qt.clipboard().image()
+                    copied = self.copied_image()
                     self.assertEqual(copied.size(), desktop.size())
                     self.assertEqual(copied.pixelColor(5, 5), QColor("#386ef2"))
-                    url, = self.qt.clipboard().mimeData().urls()
-                    path = Path(url.toLocalFile())
-                    self.assertEqual(path.parent, save_folder)
+                    path, = set(save_folder.glob("*.png")) - prior_files
                     self.assertTrue(path.name.startswith("截图 示例"))
                     self.assertEqual(QImage(str(path)).convertToFormat(copied.format()), copied)
-                    self.assertEqual(len(list(save_folder.glob("*.png"))), 2 if enabled else 1)
                     self.assertEqual(self.app.last_saved_file, path)
+                    self.assertEqual(self.app.workspace.recent_exports()[0][0], path)
                     message = self.app.dashboard.status.text()
                     self.assertIn(str(path), message)
                     if enabled:
@@ -614,11 +622,9 @@ class DashboardEntryPointTests(unittest.TestCase):
                     self.assertTrue(self.app.dashboard.isVisible())
                     self.assertEqual(self.app.workspace.history()[0][3], action)
                     if action == "save-copy":
-                        result = self.qt.clipboard().image()
-                        url, = self.qt.clipboard().mimeData().urls()
-                        copied_path = Path(url.toLocalFile())
-                        self.assertEqual(copied_path.parent, self.folder)
-                        self.assertEqual(QImage(str(copied_path)).convertToFormat(result.format()), result)
+                        result = self.copied_image()
+                        path, = set(self.folder.glob("*.png")) - prior_files
+                        self.assertEqual(QImage(str(path)).convertToFormat(result.format()), result)
                     elif action == "pin":
                         pin_id, = self.app.pin_windows
                         pin = self.app.pin_windows[pin_id]
@@ -743,11 +749,33 @@ class DashboardEntryPointTests(unittest.TestCase):
         saved = QImage(str(path))
         self.assertEqual(saved.size(), desktop.size())
         self.assertEqual(saved.pixelColor(5, 5), QColor("#386ef2"))
-        url, = self.qt.clipboard().mimeData().urls()
+        mime = self.qt.clipboard().mimeData()
+        url, = mime.urls()
         self.assertTrue(url.isLocalFile())
         self.assertEqual(Path(url.toLocalFile()), path)
+        self.assertFalse(mime.hasImage())
         entry, = self.app.workspace.history()
         self.assertEqual(entry[3], "copy-file")
+
+    def test_cli_quick_save_does_not_replace_explicit_file_copy_with_implicit_image(self):
+        desktop = self.image(360, 260, "#386ef2")
+        self.app.workspace.set("save_folder", str(self.folder))
+        self.app.workspace.set("copy_after_save", True)
+        results = []
+        command = arguments(["snip", "--full", "--block", "-o", "copy-file;quick-save"])
+        with patch("snaploom.capture.capture_desktop", return_value=Snapshot(desktop, desktop.rect())):
+            self.app.command(command, lambda **result: results.append(result))
+            self.wait_until(lambda: bool(results))
+
+        result, = results
+        self.assertEqual(result["code"], 0)
+        files = set(self.folder.glob("*.png"))
+        self.assertEqual(len(files), 2)
+        mime = self.qt.clipboard().mimeData()
+        url, = mime.urls()
+        self.assertTrue(url.isLocalFile())
+        self.assertIn(Path(url.toLocalFile()), files)
+        self.assertFalse(mime.hasImage())
 
     def test_cli_clipboard_output_remains_image_only_without_saving(self):
         desktop = self.image(360, 260, "#386ef2")
@@ -759,8 +787,7 @@ class DashboardEntryPointTests(unittest.TestCase):
 
         result, = results
         self.assertEqual(result["code"], 0)
-        self.assertEqual(self.qt.clipboard().image(), desktop)
-        self.assertFalse(self.qt.clipboard().mimeData().hasUrls())
+        self.assertEqual(self.copied_image(), desktop)
         self.assertEqual(self.app.workspace.recent_exports(), [])
         self.assertFalse(Path(self.app.workspace.get("save_folder")).exists())
 
@@ -953,9 +980,7 @@ class DashboardEntryPointTests(unittest.TestCase):
         saved = QImage(str(target))
         self.assertEqual(saved.size(), selection.size())
         self.assertEqual(saved.pixelColor(60, 70), annotated_color)
-        self.assertEqual(self.qt.clipboard().image().convertToFormat(saved.format()), saved)
-        url, = self.qt.clipboard().mimeData().urls()
-        self.assertEqual(Path(url.toLocalFile()), target)
+        self.assertEqual(self.copied_image().convertToFormat(saved.format()), saved)
         self.assertIsNone(self.app.editor)
         self.assertEqual(self.app.workspace.get("save_folder"), str(blocked_folder))
         self.assertEqual([path for path, _ in self.app.workspace.recent_exports()], [target])

@@ -20,8 +20,26 @@ from snaploom.hotkeys import LABELS, Hotkeys
 
 @unittest.skipUnless(os.environ.get("SNAPLOOM_TEST_DESKTOP") == "1", "needs a live test desktop")
 class DesktopSelectionTests(unittest.TestCase):
+    def _read_clipboard(self, script):
+        process = QProcess()
+        try:
+            process.start(sys.executable, ["-c", script])
+            self.assertTrue(process.waitForStarted(5000), process.errorString())
+            deadline = monotonic() + 10
+            while process.state() != QProcess.ProcessState.NotRunning and monotonic() < deadline:
+                QTest.qWait(20)  # The clipboard owner must process native requests.
+            self.assertEqual(process.state(), QProcess.ProcessState.NotRunning, "Clipboard reader timed out")
+            stderr = bytes(process.readAllStandardError()).decode("utf-8", errors="replace")
+            self.assertEqual(process.exitStatus(), QProcess.ExitStatus.NormalExit, stderr)
+            self.assertEqual(process.exitCode(), 0, stderr)
+            return json.loads(bytes(process.readAllStandardOutput()))
+        finally:
+            if process.state() != QProcess.ProcessState.NotRunning:
+                process.kill()
+                process.waitForFinished(2000)
+
     @unittest.skipUnless(os.name == "nt", "requires the native Windows image clipboard")
-    def test_windows_copy_exposes_native_image_and_saved_file_formats_to_another_process(self):
+    def test_windows_image_and_file_copy_publish_distinct_native_clipboard_formats(self):
         from snaploom.app import Application
 
         qt = QApplication.instance() or QApplication([])
@@ -33,10 +51,13 @@ import ctypes as C
 from ctypes import wintypes as W
 from io import BytesIO
 import json
-import sys
 import time
 
 from PIL import Image, ImageGrab
+
+CF_DIB = 8
+CF_UNICODETEXT = 13
+CF_HDROP = 15
 
 user = C.WinDLL("user32", use_last_error=True)
 kernel = C.WinDLL("kernel32", use_last_error=True)
@@ -74,140 +95,141 @@ for _ in range(50):
 else:
     raise C.WinError(C.get_last_error())
 try:
-    # Use the registered format exactly as native clipboard readers do.
-    payload = clipboard_bytes(png)
-    has_dib = bool(user.IsClipboardFormatAvailable(8))  # CF_DIB
-    path = None
-    if len(sys.argv) > 1:
-        path = clipboard_bytes(13).decode("utf-16-le").split("\0", 1)[0]  # CF_UNICODETEXT
+    has = user.IsClipboardFormatAvailable
+    payload = clipboard_bytes(png) if has(png) else None
+    result = {"has_dib": bool(has(CF_DIB)), "has_file_drop": bool(has(CF_HDROP)), "text": None}
+    if has(CF_UNICODETEXT):
+        result["text"] = clipboard_bytes(CF_UNICODETEXT).decode("utf-16-le").split("\0", 1)[0]
 finally:
     user.CloseClipboard()
 
-with Image.open(BytesIO(payload), formats=["PNG"]) as source:
-    image = source.convert("RGBA")
-    grabbed = ImageGrab.grabclipboard()
-    if isinstance(grabbed, list):
-        print(json.dumps({
-            "size": image.size, "pixel": image.getpixel((2, 3)), "has_dib": has_dib,
-            "files": grabbed, "text": path,
-        }))
-    else:
-        if not isinstance(grabbed, Image.Image):
-            raise RuntimeError("Pillow did not read the Windows clipboard as an image or file list")
-        with grabbed:
-            print(json.dumps({
-                "size": image.size, "pixel": image.getpixel((2, 3)), "has_dib": has_dib,
-                "grabbed_format": grabbed.format, "grabbed_size": grabbed.size,
-                "grabbed_pixel": grabbed.convert("RGBA").getpixel((2, 3)),
-            }))
+if payload is not None:
+    with Image.open(BytesIO(payload), formats=["PNG"]) as source:
+        result.update(native_png_size=source.size, native_png_pixel=source.convert("RGBA").getpixel((2, 3)))
+grabbed = ImageGrab.grabclipboard()
+if isinstance(grabbed, list):
+    result["grabbed_files"] = grabbed
+elif isinstance(grabbed, Image.Image):
+    with grabbed:
+        result.update(grabbed_format=grabbed.format, grabbed_size=grabbed.size,
+                      grabbed_pixel=grabbed.convert("RGBA").getpixel((2, 3)))
+else:
+    raise RuntimeError("Pillow did not read the Windows clipboard as an image or file list")
+print(json.dumps(result))
 """
         with TemporaryDirectory() as directory:
             folder = Path(directory).resolve()
             app = Application(qt, folder, testing=True)
             clipboard = qt.clipboard()
-            copied = False
             try:
-                app.workspace.set("save_folder", str(folder))
                 app.workspace.set("save_pattern", "屏幕 截图")
                 for action, format_, color in (
                     ("copy", QImage.Format.Format_RGB32, QColor(35, 88, 159)),
                     ("copy", QImage.Format.Format_ARGB32, QColor(35, 88, 159, 117)),
                     ("copy", QImage.Format.Format_ARGB32_Premultiplied, QColor(35, 88, 159, 117)),
                     ("save-copy", QImage.Format.Format_ARGB32_Premultiplied, QColor(35, 88, 159, 117)),
+                    ("copy-file", QImage.Format.Format_RGB32, QColor(35, 88, 159)),
                 ):
                     with self.subTest(action=action, image_format=format_):
+                        destination = folder / action
+                        app.workspace.set("save_folder", str(destination))
                         image = QImage(16, 12, format_)
                         image.fill(QColor("white"))
                         image.setPixelColor(2, 3, color)
-                        app.output(image, action, silent=True, record=False)
-                        copied = True
-                        process = QProcess()
-                        try:
-                            arguments = ["-c", reader]
-                            if action == "save-copy":
-                                arguments.append("read-file-path")
-                            process.start(sys.executable, arguments)
-                            self.assertTrue(process.waitForStarted(5000), process.errorString())
-                            deadline = monotonic() + 10
-                            while process.state() != QProcess.ProcessState.NotRunning and monotonic() < deadline:
-                                QTest.qWait(20)  # Windows may request the data from the owning Qt process.
-                            self.assertEqual(process.state(), QProcess.ProcessState.NotRunning, "Clipboard reader timed out")
-                            stderr = bytes(process.readAllStandardError()).decode("utf-8", errors="replace")
-                            self.assertEqual(process.exitStatus(), QProcess.ExitStatus.NormalExit, stderr)
-                            self.assertEqual(process.exitCode(), 0, stderr)
-                            data = json.loads(bytes(process.readAllStandardOutput()))
-                            self.assertEqual(data["size"], [image.width(), image.height()])
-                            self.assertEqual(data["pixel"], list(image.pixelColor(2, 3).getRgb()))
+                        app.output(image, action, silent=True, record=False, prompt_file=False)
+                        size = [image.width(), image.height()]
+                        pixel = list(image.pixelColor(2, 3).getRgb())
+                        target = destination / "屏幕 截图.png"
+                        if action == "copy":
+                            self.assertFalse(destination.exists())
+                        else:
+                            self.assertEqual(list(destination.iterdir()), [target])
+                            saved = QImage(str(target))
+                            self.assertEqual(saved.size(), image.size())
+                            self.assertEqual(list(saved.pixelColor(2, 3).getRgb()), pixel)
+                        data = self._read_clipboard(reader)
+                        if action == "copy-file":
+                            self.assertTrue(data["has_file_drop"])
+                            self.assertFalse(data["has_dib"])
+                            self.assertNotIn("native_png_size", data)
+                            self.assertEqual([Path(name) for name in data["grabbed_files"]], [target])
+                            self.assertEqual(data["text"], str(target))
+                        else:
+                            self.assertFalse(data["has_file_drop"])
+                            self.assertIsNone(data["text"])
                             self.assertTrue(data["has_dib"])
-                            if action == "save-copy":
-                                target, = folder.glob("*.png")
-                                self.assertEqual([Path(name) for name in data["files"]], [target])
-                                self.assertEqual(data["text"], str(target))
-                                self.assertEqual(list(QImage(str(target)).pixelColor(2, 3).getRgb()), data["pixel"])
-                            else:
-                                self.assertEqual(data["grabbed_format"], "PNG")
-                                self.assertEqual(data["grabbed_size"], data["size"])
-                                self.assertEqual(data["grabbed_pixel"], data["pixel"])
-                        finally:
-                            if process.state() != QProcess.ProcessState.NotRunning:
-                                process.kill()
-                                process.waitForFinished(2000)
+                            self.assertEqual(data["native_png_size"], size)
+                            self.assertEqual(data["native_png_pixel"], pixel)
+                            self.assertEqual(data["grabbed_format"], "PNG")
+                            self.assertEqual(data["grabbed_size"], size)
+                            self.assertEqual(data["grabbed_pixel"], pixel)
             finally:
-                if copied and clipboard.ownsClipboard():
+                if clipboard.ownsClipboard():
                     clipboard.clear()
                 app.dashboard.deleteLater()
                 app.shutdown()
                 QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
-    @unittest.skipUnless(sys.platform == "linux", "exercises Linux file clipboard interoperability")
-    def test_copy_file_publishes_both_clipboard_formats_to_another_process(self):
+    @unittest.skipUnless(sys.platform in {"darwin", "linux"}, "requires the macOS or X11 desktop")
+    def test_macos_and_x11_image_and_file_copy_publish_distinct_clipboard_formats(self):
         from snaploom.app import Application
 
         qt = QApplication.instance() or QApplication([])
-        if qt.platformName() != "xcb":
-            self.skipTest("requires the native X11 clipboard")
+        if qt.platformName() not in {"cocoa", "xcb"}:
+            self.skipTest("requires the native macOS or X11 clipboard")
 
         reader = """
 import json
 from PySide6.QtGui import QGuiApplication
 
 qt = QGuiApplication([])
-mime = qt.clipboard().mimeData()
+clipboard = qt.clipboard()
+mime = clipboard.mimeData()
+image = clipboard.image()
 print(json.dumps({
     "urls": [url.toLocalFile() for url in mime.urls()],
     "gnome": bytes(mime.data("x-special/gnome-copied-files")).decode("ascii"),
+    "has_text": mime.hasText(),
+    "image_size": [image.width(), image.height()] if not image.isNull() else None,
+    "image_pixel": image.pixelColor(2, 3).getRgb() if not image.isNull() else None,
 }))
 """
         with TemporaryDirectory() as directory:
             folder = Path(directory).resolve()
             app = Application(qt, folder, testing=True)
-            process = QProcess()
+            clipboard = qt.clipboard()
             try:
-                app.workspace.set("save_folder", str(folder))
                 app.workspace.set("save_pattern", "截图 示例")
                 image = QImage(16, 12, QImage.Format.Format_RGB32)
                 image.fill(Qt.GlobalColor.white)
-                app.output(image, "copy-file", silent=True, record=False, prompt_file=False)
-                target = folder / "截图 示例.png"
-                self.assertEqual(QImage(str(target)).size(), image.size())
-
-                process.start(sys.executable, ["-c", reader])
-                self.assertTrue(process.waitForStarted(5000), process.errorString())
-                deadline = monotonic() + 10
-                while process.state() != QProcess.ProcessState.NotRunning and monotonic() < deadline:
-                    QTest.qWait(20)  # The clipboard owner must process X11 selection requests.
-                self.assertEqual(process.state(), QProcess.ProcessState.NotRunning, "Clipboard reader timed out")
-                stderr = bytes(process.readAllStandardError()).decode("utf-8", errors="replace")
-                self.assertEqual(process.exitStatus(), QProcess.ExitStatus.NormalExit, stderr)
-                self.assertEqual(process.exitCode(), 0, stderr)
-                data = json.loads(bytes(process.readAllStandardOutput()))
-                self.assertEqual(data["urls"], [str(target)])
-                self.assertEqual(data["gnome"], "copy\n" + target.as_uri())
+                image.setPixelColor(2, 3, QColor("#23589f"))
+                size = [image.width(), image.height()]
+                pixel = list(image.pixelColor(2, 3).getRgb())
+                for action in ("save-copy", "copy-file"):
+                    with self.subTest(action=action):
+                        destination = folder / action
+                        app.workspace.set("save_folder", str(destination))
+                        app.output(image, action, silent=True, record=False, prompt_file=False)
+                        target = destination / "截图 示例.png"
+                        self.assertEqual(list(destination.iterdir()), [target])
+                        saved = QImage(str(target))
+                        self.assertEqual(saved.size(), image.size())
+                        self.assertEqual(list(saved.pixelColor(2, 3).getRgb()), pixel)
+                        data = self._read_clipboard(reader)
+                        if action == "save-copy":
+                            self.assertEqual(data["urls"], [])
+                            self.assertEqual(data["gnome"], "")
+                            self.assertFalse(data["has_text"])
+                            self.assertEqual(data["image_size"], size)
+                            self.assertEqual(data["image_pixel"], pixel)
+                        else:
+                            self.assertEqual(data["urls"], [str(target)])
+                            if sys.platform == "linux":
+                                self.assertEqual(data["gnome"], "copy\n" + target.as_uri())
+                            self.assertIsNone(data["image_size"])
             finally:
-                if process.state() != QProcess.ProcessState.NotRunning:
-                    process.kill()
-                    process.waitForFinished(2000)
-                qt.clipboard().clear()
+                if clipboard.ownsClipboard():
+                    clipboard.clear()
                 app.dashboard.deleteLater()
                 app.shutdown()
                 QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
