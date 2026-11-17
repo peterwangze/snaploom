@@ -177,7 +177,7 @@ class UserJourneyTests(unittest.TestCase):
             ("Capture region", "区域截图", "capture"), ("Current display", "当前屏幕", "screen"),
             ("All displays", "所有屏幕", "full"), ("Active window", "当前窗口", "active"),
             ("Size and delay…", "尺寸与延时…", "custom"), ("Whiteboard…", "白板…", "whiteboard"),
-            ("Open image…", "打开图像…", "open"), ("Restore last hidden pin", "恢复最近隐藏的贴图", "restore-last-pin"),
+            ("Pin image files…", "从图片文件新建贴图…", "open"), ("Restore last hidden pin", "恢复最近隐藏的贴图", "restore-last-pin"),
             ("Show or hide pins", "显示或隐藏贴图", "toggle_pins"),
             ("Help", "操作帮助", "help"), ("Settings", "设置", "settings"),
             ("Check for updates…", "检查更新…", "check-updates"),
@@ -215,7 +215,7 @@ class UserJourneyTests(unittest.TestCase):
         app = self.application
         target = self.folder / "reference.png"
         self.assertTrue(self.image.save(str(target)))
-        button = self.button(app.dashboard, "Open image…", "打开图像…")
+        button = self.button(app.dashboard, "Pin image files…", "从图片文件新建贴图…")
         with patch("snaploom.app.QFileDialog.getOpenFileNames", side_effect=[([], ""), ([str(target)], "")]) as choose:
             self.click(button)
             self.assertFalse(app.pin_windows)
@@ -469,7 +469,7 @@ class UserJourneyTests(unittest.TestCase):
             self.tray_item("Open last save location", "打开最近保存位置")
         self.assertEqual([Path(call.args[0].toLocalFile()) for call in open_url.call_args_list], [self.folder] * 4)
 
-    def test_saved_files_survive_restart_and_open_the_selected_folder(self):
+    def test_saved_files_survive_restart_and_open_the_selected_image_or_folder(self):
         app = self.application
         earlier = self.folder / "Screenshots" / "first capture.png"
         latest = self.folder / "Review" / "复核 截图.png"
@@ -507,6 +507,7 @@ class UserJourneyTests(unittest.TestCase):
 
         with patch("snaploom.app.QDesktopServices.openUrl", return_value=True) as open_url:
             self.click(self.button(app.dashboard, "Open folder", "打开所在文件夹"))
+            self.click(self.button(app.dashboard, "Open image", "打开图片"))
             export_list.setFocus()
             QTest.keyClick(export_list, Qt.Key.Key_Return)
             latest_row = export_list.visualItemRect(export_list.item(0)).center()
@@ -514,7 +515,7 @@ class UserJourneyTests(unittest.TestCase):
             local = app.dashboard.mapFromGlobal(export_list.viewport().mapToGlobal(latest_row))
             QTest.mouseDClick(app.dashboard.windowHandle(), Qt.MouseButton.LeftButton, pos=local)
         self.assertEqual([Path(call.args[0].toLocalFile()) for call in open_url.call_args_list],
-                         [earlier.parent, earlier.parent, latest.parent])
+                         [earlier.parent, earlier, earlier, latest])
 
     def test_missing_export_folder_and_clear_records_preserve_screenshot_history(self):
         app = self.application
@@ -533,6 +534,8 @@ class UserJourneyTests(unittest.TestCase):
         export_list = app.dashboard.export_list
         self.click(export_list.viewport(), export_list.visualItemRect(export_list.item(0)).center())
         with patch("snaploom.app.QDesktopServices.openUrl") as open_url:
+            self.click(self.button(app.dashboard, "Open image", "打开图片"))
+            self.assertIn(str(missing), app.dashboard.status.text())
             self.click(self.button(app.dashboard, "Open folder", "打开所在文件夹"))
         open_url.assert_not_called()
         self.assertIn(str(missing.parent), app.dashboard.status.text())
@@ -551,6 +554,7 @@ class UserJourneyTests(unittest.TestCase):
         self.assertFalse(app.dashboard.save_location_button.isVisible())
         self.assertFalse(app.tray_save_location.isVisible())
         self.assertFalse(clear.isEnabled())
+        self.assertFalse(self.button(app.dashboard, "Open image", "打开图片").isEnabled())
         self.assertFalse(self.button(app.dashboard, "Open folder", "打开所在文件夹").isEnabled())
         self.assertFalse(self.button(app.dashboard, "Copy file path", "复制文件路径").isEnabled())
         self.assertEqual(app.workspace.history(), history)

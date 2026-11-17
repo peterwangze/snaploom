@@ -64,6 +64,7 @@ class Dashboard(QWidget):
     pin_action = Signal(str, int)
     export_action = Signal(str, str)
     pin_delete_requested = Signal(list)
+    pin_move_requested = Signal(list)
     files_dropped = Signal(list)
     closing = Signal()
 
@@ -120,9 +121,16 @@ class Dashboard(QWidget):
             ("show", "Show", "显示"), ("hide", "Hide", "隐藏"), ("recover", "Recover off-screen", "找回屏幕外贴图"),
             ("group", "Move…", "移动…"), ("solo", "Solo", "独显"), ("delete", "Delete", "删除"),
         ], self.pin_action)
+        pin_actions = QHBoxLayout()
+        self.pin_exit_solo_button = QPushButton(self.tr("Exit solo", "退出独显"))
+        self.pin_exit_solo_button.clicked.connect(lambda: self.action.emit("exit-pin-solo"))
+        self.pin_exit_solo_button.hide()
+        pin_actions.addWidget(self.pin_exit_solo_button)
+        pin_actions.addStretch()
         manager = QPushButton(self.tr("Manage groups…", "管理分组…"))
         manager.clicked.connect(lambda: self.action.emit("manage-groups"))
-        pins_page.layout().insertWidget(0, manager, alignment=Qt.AlignmentFlag.AlignRight)
+        pin_actions.addWidget(manager)
+        pins_page.layout().insertLayout(0, pin_actions)
         self.pin_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.tabs.addTab(history_page, self.tr("History", "历史"))
         self.tabs.addTab(pins_page, self.tr("Pins", "贴图"))
@@ -177,10 +185,11 @@ class Dashboard(QWidget):
         layout.addWidget(self.exports_empty)
         self.export_list = WorkspaceList()
         self.export_list.setAccessibleName(self.tr("Saved files", "已保存文件"))
-        self.export_list.open_requested.connect(lambda path: self.export_action.emit("open", path))
+        self.export_list.open_requested.connect(lambda path: self.export_action.emit("open-image", path))
         layout.addWidget(self.export_list, 1)
         controls = QHBoxLayout()
         for action, english, chinese in (
+            ("open-image", "Open image", "打开图片"),
             ("open", "Open folder", "打开所在文件夹"),
             ("copy", "Copy file path", "复制文件路径"),
         ):
@@ -255,7 +264,7 @@ class Dashboard(QWidget):
         layout.addWidget(pin_hint)
         line = QHBoxLayout()
         for action, en, zh in (
-            ("open", "Open image…", "打开图像…"),
+            ("open", "Pin image files…", "从图片文件新建贴图…"),
             ("restore-last-pin", "Restore last hidden pin", "恢复最近隐藏的贴图"),
             ("toggle_pins", "Show or hide pins", "显示或隐藏贴图"),
         ):
@@ -274,6 +283,9 @@ class Dashboard(QWidget):
         row.setSpacing(5)
         for action, en, zh in buttons:
             button = QPushButton(self.tr(en, zh))
+            if action == "solo":
+                button.setToolTip(self.tr("Select one pin to show it on its own. Exit solo restores the previous view.",
+                                          "选中一张贴图即可暂时单独显示。退出独显可恢复之前的显示。"))
             button.clicked.connect(lambda checked=False, selected=action: self.emit_selection(widget, selected, signal))
             if action in {"clear", "recover"}:
                 self._list_wide_actions[widget] = button
@@ -290,16 +302,22 @@ class Dashboard(QWidget):
         return page
 
     def emit_selection(self, widget, action, signal):
-        if action in {"clear", "recover", "solo"}:
+        if action in {"clear", "recover"}:
             current = widget.currentItem()
-            if action == "solo" and (current is None or not current.isSelected()):
-                return
             signal.emit(action, current.data(Qt.ItemDataRole.UserRole) if current else -1)
             return
         ids = [item.data(Qt.ItemDataRole.UserRole) for item in widget.selectedItems()]
+        if action == "solo":
+            if len(ids) == 1:
+                signal.emit(action, ids[0])
+            return
         if widget is self.pin_list and action == "delete":
             if ids:
                 self.pin_delete_requested.emit(ids)
+            return
+        if widget is self.pin_list and action == "group":
+            if ids:
+                self.pin_move_requested.emit(ids)
             return
         for item_id in ids:
             signal.emit(action, item_id)
@@ -331,7 +349,7 @@ class Dashboard(QWidget):
             self.history_list.setCurrentRow(0)
         self._list_wide_actions[self.history_list].setEnabled(bool(rows))
 
-    def update_pins(self, pins, current_group):
+    def update_pins(self, pins, current_group, solo_pin_id=None):
         selected = {item.data(Qt.ItemDataRole.UserRole) for item in self.pin_list.selectedItems()}
         current = self.pin_list.currentItem()
         current_id = current.data(Qt.ItemDataRole.UserRole) if current else None
@@ -339,7 +357,9 @@ class Dashboard(QWidget):
         self.pin_list.clear()
         for pin_id, window in pins.items():
             group = window.state["group"]
-            if window.isVisible():
+            if pin_id == solo_pin_id:
+                label = self.tr("Solo", "独显中")
+            elif window.isVisible():
                 label = self.tr("Visible", "已显示")
             elif not window.state["visible"]:
                 label = self.tr("Hidden individually", "已单独隐藏")
@@ -362,6 +382,7 @@ class Dashboard(QWidget):
         if was_empty and self.pin_list.count():
             self.pin_list.setCurrentRow(0)
         self._list_wide_actions[self.pin_list].setEnabled(bool(pins))
+        self.pin_exit_solo_button.setVisible(solo_pin_id is not None)
 
     def showEvent(self, event):
         disable_capture_window_transitions(self)

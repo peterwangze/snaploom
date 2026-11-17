@@ -101,9 +101,14 @@ class WorkspaceTests(unittest.TestCase):
         document = QImage(rgb, 160, 260, 480, QImage.Format.Format_RGB888)
         first = document.copy(0, 0, 160, 160)
         second = document.copy(0, 55, 160, 160)
-        result = stitch_images(first, second)
-        self.assertEqual(result.height(), 215)
-        self.assertTrue(np.array_equal(pixels(result), rgb[:215]))
+        for scale in (1.0, 1.5, 2.0):
+            with self.subTest(scale=scale):
+                first.setDevicePixelRatio(scale)
+                second.setDevicePixelRatio(scale)
+                result = stitch_images(first, second)
+                self.assertEqual(result.height(), 215)
+                self.assertEqual(result.devicePixelRatio(), scale)
+                self.assertTrue(np.array_equal(pixels(result), rgb[:215]))
         self.assertIsNone(stitch_images(first, first))
 
     def test_hotkey_parse(self):

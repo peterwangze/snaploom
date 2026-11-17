@@ -497,6 +497,123 @@ class PinInteractionTests(PinInteractionFixture):
         self.assertFalse(remove.isEnabled())
         dialog.reject()
 
+    def test_solo_exit_restores_only_previously_displayed_pins_and_does_not_reorder_hidden_pins(self):
+        app = self.application
+        peer_id, peer = self.open_pin(QPoint(10, 90), width=100)
+        parked_id, parked = self.open_pin(QPoint(120, 90), width=100)
+        target_id, target = self.open_pin(QPoint(230, 90), width=100)
+        app.pin_action("hide", target_id)
+        parked.hide()  # A temporarily hidden window is still eligible to display.
+        stored_before = {pin_id: state for pin_id, _, state in app.workspace.pins()}
+        app.dashboard.tabs.setCurrentIndex(2)
+        pins = app.dashboard.pin_list
+        row = next(pins.item(index) for index in range(pins.count())
+                   if pins.item(index).data(Qt.ItemDataRole.UserRole) == target_id)
+        QTest.mouseClick(pins.viewport(), Qt.MouseButton.LeftButton, pos=pins.visualItemRect(row).center())
+        solo = self.button(app.dashboard.tabs.currentWidget(), "Solo", "独显")
+        QTest.mouseClick(solo, Qt.MouseButton.LeftButton)
+        self.assertTrue(target.isVisible())
+        self.assertFalse(peer.isVisible())
+        self.assertFalse(parked.isVisible())
+        self.assertEqual(app.closed_pins, [target_id])
+        self.assertEqual({pin_id: state for pin_id, _, state in app.workspace.pins()}, stored_before)
+
+        exit_button = self.button(app.dashboard.tabs.currentWidget(), "Exit solo", "退出独显")
+        self.assertTrue(exit_button.isVisible())
+        QTest.mouseClick(exit_button, Qt.MouseButton.LeftButton)
+        self.assertTrue(peer.isVisible())
+        self.assertFalse(parked.isVisible())
+        self.assertFalse(target.isVisible())
+        self.assertFalse(exit_button.isVisible())
+        self.assertEqual(app.closed_pins, [target_id])
+
+        QTest.mouseClick(solo, Qt.MouseButton.LeftButton)
+        self.assertTrue(target.isVisible())
+        self.choose_tray_item("Exit solo", "退出独显")
+        self.assertEqual({pin_id for pin_id, pin in app.pin_windows.items() if pin.isVisible()}, {peer_id})
+        self.assertTrue(app.pin_windows[parked_id].state["visible"])
+        QTest.mouseClick(solo, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(solo, Qt.MouseButton.LeftButton)
+        self.assertTrue(peer.isVisible())
+        self.assertFalse(target.isVisible())
+        self.choose_tray_item("Restore last hidden pin", "恢复最近隐藏的贴图")
+        self.assertTrue(target.isVisible())
+        self.assertFalse(parked.isVisible())
+
+    def test_solo_remains_during_capture_and_group_switch_or_restart_returns_normal_pins(self):
+        app = self.application
+        peer_id, peer = self.open_pin(QPoint(10, 90), width=100)
+        target_id, target = self.open_pin(QPoint(120, 90), width=100)
+        _, other = self.open_pin(QPoint(230, 90), width=100, state={"group": "Other"})
+        app.pin_action("hide", target_id)
+        app.pin_action("solo", target_id)
+        app.workspace.set("hide_pins_on_capture", True)
+        temporarily_hidden = app.hide_capture_pins()
+        self.assertEqual(temporarily_hidden, [target])
+        self.assertFalse(target.isVisible())
+        app.restore_capture_pins(temporarily_hidden)
+        self.assertTrue(target.isVisible())
+        self.assertFalse(peer.isVisible())
+        app.switch_group("Other")
+        self.assertTrue(other.isVisible())
+        self.assertFalse(target.isVisible())
+        self.assertIsNone(app.solo_pin_id)
+
+        app.switch_group("Default")
+        self.assertTrue(peer.isVisible())
+        app.pin_action("solo", target_id)
+        self.close_application()
+        self.start_application()
+        reopened = self.application
+        self.assertIsNone(reopened.solo_pin_id)
+        self.assertTrue(reopened.pin_windows[peer_id].isVisible())
+        self.assertFalse(reopened.pin_windows[target_id].isVisible())
+        self.assertEqual(reopened.closed_pins, [target_id])
+
+    def test_solo_requires_exactly_one_selected_pin(self):
+        app = self.application
+        _, first = self.open_pin(QPoint(10, 90), width=100)
+        _, second = self.open_pin(QPoint(120, 90), width=100)
+        app.dashboard.tabs.setCurrentIndex(2)
+        pins = app.dashboard.pin_list
+        solo = self.button(app.dashboard.tabs.currentWidget(), "Solo", "独显")
+        first_point = pins.visualItemRect(pins.item(0)).center()
+        second_point = pins.visualItemRect(pins.item(1)).center()
+        QTest.mouseClick(pins.viewport(), Qt.MouseButton.LeftButton, pos=first_point)
+        self.assertTrue(solo.isEnabled())
+        QTest.mouseClick(pins.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, pos=second_point)
+        self.assertEqual(len(pins.selectedItems()), 2)
+        self.assertFalse(solo.isEnabled())
+        QTest.mouseClick(solo, Qt.MouseButton.LeftButton)
+        app.dashboard.emit_selection(pins, "solo", app.dashboard.pin_action)
+        self.assertIsNone(app.solo_pin_id)
+        self.assertTrue(first.isVisible() and second.isVisible())
+
+    def test_move_multiple_selected_pins_uses_one_group_picker(self):
+        app = self.application
+        first, _ = self.open_pin(QPoint(10, 90), width=100)
+        second, _ = self.open_pin(QPoint(120, 90), width=100)
+        untouched, _ = self.open_pin(QPoint(230, 90), width=100)
+        app.dashboard.tabs.setCurrentIndex(2)
+        pins = app.dashboard.pin_list
+        first_point = pins.visualItemRect(pins.item(0)).center()
+        second_point = pins.visualItemRect(pins.item(1)).center()
+        QTest.mouseClick(pins.viewport(), Qt.MouseButton.LeftButton, pos=first_point)
+        QTest.mouseClick(pins.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, pos=second_point)
+        self.assertEqual({item.data(Qt.ItemDataRole.UserRole) for item in pins.selectedItems()}, {first, second})
+        move = self.button(app.dashboard.tabs.currentWidget(), "Move…", "移动…")
+        with patch.object(QInputDialog, "getItem", return_value=("", False)) as choose_group:
+            QTest.mouseClick(move, Qt.MouseButton.LeftButton)
+            choose_group.assert_called_once()
+        self.assertEqual({pin.state["group"] for pin in app.pin_windows.values()}, {"Default"})
+        with patch.object(QInputDialog, "getItem", return_value=("Review", True)) as choose_group:
+            QTest.mouseClick(move, Qt.MouseButton.LeftButton)
+            choose_group.assert_called_once()
+        persisted = {pin_id: state["group"] for pin_id, _, state in app.workspace.pins()}
+        self.assertEqual(persisted, {first: "Review", second: "Review", untouched: "Default"})
+        self.assertEqual(app.groups(), ["Default", "Review"])
+        self.assertEqual(app.group, "Default")
+
     def test_group_manager_create_reorder_move_pin_and_switch_from_tray(self):
         app = self.application
         app.dashboard.tabs.setCurrentIndex(2)

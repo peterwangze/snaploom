@@ -147,6 +147,8 @@ def _compose_state(app, write_image):
         "editors": [],
         "recognition": [],
     }
+    if app.solo_pin_id is not None:
+        state["pin_solo"] = {"target": app.solo_pin_id, "visible_before": sorted(app.pins_visible_before_solo)}
     editor = app.editor
     if editor is not None:
         context = app.capture_context
@@ -161,13 +163,14 @@ def _compose_state(app, write_image):
             "hidden_pins": _pin_ids(app, context.get("pins", ())),
         }
     if app.scroll_dialog is not None:
-        current, region, restore_dashboard, hidden = app.scroll_dialog.restart_scroll()
+        current, region, restore_dashboard, hidden, undo_heights = app.scroll_dialog.restart_scroll()
         state["scroll"] = {
             "image": write_image(current),
             "region": rect_values(region),
             "geometry": _widget_geometry(app.scroll_dialog),
             "dashboard": restore_dashboard,
             "hidden_pins": _pin_ids(app, hidden),
+            "undo_heights": undo_heights,
         }
     for dialog in app.dialogs:
         # A pin or its editor may be hidden temporarily while a capture is open.
@@ -287,8 +290,13 @@ def _read_state(path):
                 read_image(snapshot["image"]), QRect(*snapshot["geometry"]),
                 tuple(ScreenFrame(QRect(*rect), read_image(ref)) for rect, ref in snapshot["frames"]),
             )
-        if "scroll" in state:
-            state["scroll"]["image"] = read_image(state["scroll"]["image"])
+        if scrolling := state.get("scroll"):
+            scrolling["image"] = read_image(scrolling["image"])
+            heights = scrolling.get("undo_heights", [])
+            if not isinstance(heights, list) or any(type(height) is not int for height in heights):
+                heights = []
+            boundaries = [0, *heights, scrolling["image"].height()]
+            scrolling["undo_heights"] = heights if all(left < right for left, right in zip(boundaries, boundaries[1:])) else []
         for draft in state["editors"]:
             draft["image"] = read_image(draft["image"])
     return state
@@ -327,6 +335,18 @@ def _restore_state(app, state):
         window.setVisible(pin_id in visible)
         if pin_id in visible:
             window.recover_position()
+    solo = state.get("pin_solo")
+    if not isinstance(solo, dict):
+        solo = {}
+    target_id = solo.get("target")
+    target = app.pin_windows.get(target_id) if type(target_id) is int else None
+    if target is not None and target.state["group"] == app.group:
+        visible_before = solo.get("visible_before", [])
+        app.solo_pin_id = target_id
+        app.pins_visible_before_solo = {
+            pin_id for pin_id in visible_before
+            if type(pin_id) is int and pin_id in app.pin_windows and app.pin_windows[pin_id].state["group"] == app.group
+        } if isinstance(visible_before, list) else set()
     app.update_lists()
 
     def hidden_pins(draft):
@@ -341,7 +361,8 @@ def _restore_state(app, state):
         app.open_capture_editor(snapshot, None, options, radius, draft=capture["canvas"])
     elif scrolling := state.get("scroll"):
         app.scroll_capture(scrolling["image"], QRect(*scrolling["region"]), None,
-                           restore_dashboard=scrolling["dashboard"], hidden_pins=hidden_pins(scrolling))
+                           restore_dashboard=scrolling["dashboard"], hidden_pins=hidden_pins(scrolling),
+                           undo_heights=scrolling["undo_heights"])
         _restore_geometry(app.scroll_dialog, scrolling["geometry"])
 
     for draft in state["editors"]:

@@ -143,6 +143,18 @@ Windows 已通过原生保存对话框验证文件名输入、JPEG 写入和生�
 - Windows 上先用实际 iCode 0.35.2 输入框验证按键及终端的括号粘贴序列，再通过官方 Windows Terminal 1.25.3131.0 窗口发送 `Ctrl+V` 和 `Shift+Insert`。两种快捷键都生成了图片附件，像素与 Snaploom 自动保存的 PNG 一致。 [iCode 控件验证](https://github.com/peterwangze/snaploom/actions/runs/44037896553) · [实际终端验证](https://github.com/peterwangze/snaploom/actions/runs/44038992610)
 - Windows、macOS 和 Linux X11 的剪贴板测试各使用独立进程读取图像和显式复制的文件。三平台的五组架构构建均通过从 1.0.22 升级、重启和工作区恢复检查。 [三平台验收](https://github.com/peterwangze/snaploom/actions/runs/44037522683)
 
+## 1.0.24 截图与贴图流程
+
+| 用户入口 | 回归场景 |
+| --- | --- |
+| 区域截图和工具栏 | 在无选区时按 Enter、复制和保存键，随后明确选择窗口或屏幕。检查长选区旁的工具栏位置、浮动工具栏获得焦点时的快捷键，以及框选后的输出像素。 |
+| 区域放大 | 先实色遮盖，再用区域放大工具，逐像素检查预览和导出。另行验证橡皮擦的主动恢复行为。 |
+| 滚动截图 | 添加多帧、浏览预览、逐帧撤回、重新添加、导出，覆盖 100%、150% 和 200% 的拼接像素。重新启动后检查已拼图片和撤回功能。 |
+| 已保存文件 | 检查按钮、Enter 和双击打开文件，以及打开所在目录、文件移走、清空记录。 |
+| 贴图管理 | 通过工作台和托盘退出独显。覆盖单独隐藏、跨组操作、多选限制、批量移动的确认与取消，以及升级重启后恢复独显。 |
+
+[三平台离线包验收](https://github.com/peterwangze/snaploom/actions/workflows/release.yml?query=branch%3Av1.0.24) · [行业调研与体验审计](usability-review.md)
+
 ## 发布包的环境边界
 
 - Windows x64 离线安装通过 Inno Setup，提供安装和免安装两种形式。当前包无 Authenticode 签名。

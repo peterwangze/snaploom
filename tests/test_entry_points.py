@@ -11,8 +11,8 @@ from PySide6.QtGui import QColor, QImage
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QMessageBox, QPushButton,
-    QSpinBox, QSystemTrayIcon, QTextEdit, QToolButton,
+    QApplication, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QLabel, QMessageBox, QPushButton,
+    QScrollArea, QSpinBox, QSystemTrayIcon, QTextEdit, QToolButton,
 )
 from shiboken6 import isValid
 
@@ -1062,6 +1062,52 @@ class DashboardEntryPointTests(unittest.TestCase):
                 self.assertFalse(self.app.dialogs)
                 self.assertTrue(self.app.dashboard.isVisible())
         self.assertEqual([record[3] for record in self.app.workspace.history()], ["pin"])
+
+    def test_scrolling_preview_and_undo_allow_correcting_frames_before_export(self):
+        import numpy as np
+
+        rgb = np.random.default_rng(42).integers(0, 255, (270, 160, 3), dtype=np.uint8)
+        document = QImage(rgb, 160, 270, 480, QImage.Format.Format_RGB888).copy()
+        first = document.copy(0, 0, 160, 160)
+        second = document.copy(0, 45, 160, 160)
+        third = document.copy(0, 90, 160, 160)
+        editor = self.open_capture("All displays", "所有屏幕", first)
+        self.enterContext(patch("snaploom.capture.capture_desktop", side_effect=[Snapshot(frame, frame.rect())
+                          for frame in (second, third, second)]))
+        self.click_capture_menu_item(editor, "Scrolling capture", "滚动截图")
+        dialog, = self.app.dialogs
+        undo = next(button for button in dialog.findChildren(QPushButton)
+                    if button.text() == self.app.tr("Undo last frame", "撤回上一帧"))
+        summary = dialog.findChild(QLabel, "ScrollingCaptureStatus")
+        self.assertFalse(undo.isEnabled())
+        self.assertIn("160 × 160", summary.text())
+
+        for height in (205, 250):
+            self.click_button("Add next frame", "添加下一帧", parent=dialog)
+            self.wait_until(dialog.isVisible)
+            self.assertIn(f"160 × {height}", summary.text())
+
+        self.click_button("Preview…", "预览拼接结果…", parent=dialog)
+        viewer, = self.app.dialogs - {dialog}
+        preview = viewer.findChild(QScrollArea).widget().pixmap().toImage()
+        self.assertEqual((preview.width(), preview.height()), (160, 250))
+        self.assertEqual(preview.pixelColor(80, 225), document.pixelColor(80, 225))
+        QTest.keyClick(viewer.windowHandle(), Qt.Key.Key_Escape)
+        self.assertEqual(self.app.dialogs, {dialog})
+
+        for height in (205, 160):
+            self.click_at(undo)
+            self.assertIn(f"160 × {height}", summary.text())
+        self.assertFalse(undo.isEnabled())
+        self.click_button("Add next frame", "添加下一帧", parent=dialog)
+        self.wait_until(dialog.isVisible)
+        self.assertIn("160 × 205", summary.text())
+
+        self.click_button("Save and Copy", "保存并复制", parent=dialog)
+        saved_path, _ = self.app.workspace.recent_exports()[0]
+        expected = document.copy(0, 0, 160, 205).convertToFormat(QImage.Format.Format_RGB32)
+        self.assertEqual(QImage(str(saved_path)).convertToFormat(expected.format()), expected)
+        self.assertEqual(self.copied_image().convertToFormat(expected.format()), expected)
 
     def test_relaunch_and_capture_request_reveal_scrolling_capture_until_cancelled(self):
         desktop = self.image(540, 390, "#386ef2")

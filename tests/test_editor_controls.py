@@ -1,10 +1,10 @@
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QImage, QPainter
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QImage, QKeySequence, QPainter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QColorDialog, QFontDialog, QInputDialog, QMenu, QStyle, QStyleOptionSpinBox, QToolButton
+from PySide6.QtWidgets import QApplication, QColorDialog, QFontDialog, QInputDialog, QLabel, QMenu, QStyle, QStyleOptionSpinBox, QToolButton
 
 from snaploom.capture import Snapshot
 from snaploom.editor import CaptureEditor, ImageEditor
@@ -385,10 +385,78 @@ class EditorControlTests(unittest.TestCase):
         self.assertEqual(editor.hover_index, 0)
         QTest.wheelEvent(window, point, QPoint(0, -120))
         self.assertEqual(editor.hover_index, 1)
+        self.qt.processEvents()
         QTest.keyClick(window, Qt.Key.Key_Return)
         (action, image, rect), = completed
         self.assertEqual((action, rect), ("copy", behind))
         self.assertEqual(image.size(), behind.size())
+
+    def test_output_waits_for_a_selection_and_allows_explicit_full_screen(self):
+        editor = self.open_editor(selection=QRect(), default_action="save-copy", auto_detect=False)
+        completed = []
+        editor.completed.connect(lambda *args: completed.append(args))
+        window = editor.windowHandle()
+        ctrl = Qt.KeyboardModifier.ControlModifier
+        QTest.mouseMove(window, editor.rect().center())
+        hint = editor.findChild(QLabel, "captureSelectionHint")
+        self.assertFalse(hint.isVisible())
+        for key, modifiers in ((Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier),
+                               (Qt.Key.Key_C, ctrl), (Qt.Key.Key_S, ctrl),
+                               (Qt.Key.Key_S, ctrl | Qt.KeyboardModifier.ShiftModifier)):
+            with self.subTest(key=key, modifiers=modifiers):
+                QTest.keyClick(window, key, modifiers)
+                self.assertEqual(completed, [])
+                self.assertTrue(editor.selection.isEmpty())
+                self.assertTrue(hint.isVisible())
+        self.assertIn("拖动框选区域", hint.text())
+        self.assertIn(QKeySequence("Ctrl+A").toString(QKeySequence.SequenceFormat.NativeText), hint.text())
+        self.assertTrue(editor.rect().contains(hint.geometry()))
+        self.assertIs(self.qt.widgetAt(editor.mapToGlobal(hint.geometry().center())), editor)
+        QTest.keyClick(window, Qt.Key.Key_A, ctrl)
+        self.assertFalse(hint.isVisible())
+        self.assertEqual(completed, [])
+        self.assertEqual(editor.selected_geometry(), editor.snapshot.geometry)
+        self.qt.processEvents()
+        self.assertIs(self.qt.focusWidget(), editor)
+        QTest.keyClick(self.qt.focusWindow(), Qt.Key.Key_Return)
+        (action, image, rect), = completed
+        self.assertEqual((action, rect), ("save-copy", editor.snapshot.geometry))
+        self.assertEqual(image.size(), editor.snapshot.geometry.size())
+
+        completed.clear()
+        QTest.keyClick(self.qt.focusWindow(), Qt.Key.Key_Tab)
+        self.qt.processEvents()
+        self.assertTrue(editor.toolbar.isAncestorOf(self.qt.focusWidget()))
+        QTest.keyClick(self.qt.focusWindow(), Qt.Key.Key_C, ctrl)
+        (action, image, rect), = completed
+        self.assertEqual((action, rect), ("save-copy", editor.snapshot.geometry))
+        self.assertEqual(image.size(), editor.snapshot.geometry.size())
+
+    def test_output_accepts_a_window_after_its_highlight_is_painted(self):
+        bounds = self.qt.primaryScreen().availableGeometry()
+        window_bounds = QRect(bounds.topLeft() + QPoint(50, 60), QSize(190, 120))
+        editor = self.open_editor(bounds, selection=QRect(), windows=((window_bounds, "Window"),), locale="en")
+        completed = []
+        editor.completed.connect(lambda *args: completed.append(args))
+        window = editor.windowHandle()
+        QTest.mouseMove(window, QPoint(18, 20))
+        self.qt.processEvents()
+        editor.setUpdatesEnabled(False)
+        try:
+            QTest.mouseMove(window, QPoint(85, 90))
+            QTest.keyClick(window, Qt.Key.Key_Return)
+            self.assertEqual(completed, [])
+            self.assertTrue(editor.selection.isEmpty())
+            hint = editor.findChild(QLabel, "captureSelectionHint")
+            self.assertTrue(hint.isVisible())
+            self.assertIn("point at a window", hint.text())
+        finally:
+            editor.setUpdatesEnabled(True)
+        self.qt.processEvents()
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        (action, image, rect), = completed
+        self.assertEqual((action, rect), ("copy", window_bounds))
+        self.assertEqual(image.size(), window_bounds.size())
 
     def test_direction_keys_move_and_resize_then_enter_confirms_keyboard_selection(self):
         original = QRect(44, 42, 144, 110)
@@ -794,6 +862,38 @@ class EditorControlTests(unittest.TestCase):
             QTest.keyClick(window, Qt.Key.Key_Period)
             self.assertEqual(editor.selected_geometry(), expected)
 
+    def test_magnify_preview_and_export_preserve_redaction_until_erased(self):
+        editor = self.open_editor()
+        selection_origin = editor.selection.topLeft()
+        secret = QPoint(125, 116)
+        zoomed_pixel = QPoint(76, 78)
+        zoom_start, zoom_end = QPoint(62, 62), QPoint(190, 174)
+
+        self.click(editor.tool_buttons["redact"])
+        self.drag(editor, QPoint(90, 86), QPoint(162, 150))
+        before_zoom = editor.export_image()
+        redacted_color = before_zoom.pixelColor(secret - selection_origin)
+        self.assertNotEqual(redacted_color, QColor("#ffffff"))
+        self.assertEqual(before_zoom.pixelColor(zoomed_pixel - selection_origin), QColor("#ffffff"))
+
+        self.click(editor.tool_buttons["magnify"])
+        window = editor.windowHandle()
+        QTest.mousePress(window, Qt.MouseButton.LeftButton, pos=zoom_start)
+        QTest.mouseMove(window, zoom_end)
+        self.qt.processEvents()
+        preview = editor.grab(QRect(zoomed_pixel, QSize(1, 1))).toImage()
+        self.assertEqual(preview.pixelColor(0, 0), redacted_color)
+        QTest.mouseRelease(window, Qt.MouseButton.LeftButton, pos=zoom_end)
+        exported = editor.export_image()
+        self.assertEqual(exported.pixelColor(zoomed_pixel - selection_origin), redacted_color)
+        self.assertEqual(exported.pixelColor(secret - selection_origin), redacted_color)
+
+        self.click(editor.tool_buttons["erase"])
+        self.drag(editor, QPoint(112, 103), QPoint(138, 131))
+        restored = editor.export_image()
+        self.assertEqual(restored.pixelColor(secret - selection_origin), QColor("#ffffff"))
+        self.assertEqual(restored.pixelColor(zoomed_pixel - selection_origin), redacted_color)
+
     def test_redaction_stays_on_original_pixels_when_selection_is_reframed(self):
         editor = self.open_editor()
         window = editor.windowHandle()
@@ -902,6 +1002,28 @@ class EditorControlTests(unittest.TestCase):
         blank = actions_at(QPoint(200, 120))
         self.assertIn("清空全部标注", blank)
         self.assertNotIn("删除所选标注", blank)
+
+    def test_toolbar_uses_available_space_beside_a_tall_selection(self):
+        bounds = QRect(0, 0, 1200, 720)
+
+        class WideScreen:
+            def availableGeometry(self):
+                return bounds
+
+        with patch.object(QApplication, "screenAt", return_value=WideScreen()):
+            for x in (10, bounds.right() - 129):
+                with self.subTest(x=x):
+                    selection = QRect(x, 10, 120, bounds.height() - 20)
+                    editor = self.open_editor(bounds, selection=selection)
+                    toolbar_bounds = editor.toolbar.geometry()
+                    self.assertFalse(editor.toolbar.isWindow())
+                    self.assertTrue(editor.rect().contains(toolbar_bounds))
+                    self.assertFalse(selection.intersects(toolbar_bounds))
+                    if x == 10:
+                        self.assertGreater(toolbar_bounds.left(), selection.right())
+                    else:
+                        self.assertLess(toolbar_bounds.right(), selection.left())
+                    editor.close()
 
     def test_toolbar_controls_are_reachable_on_a_small_screen(self):
         screen_bounds = self.qt.primaryScreen().availableGeometry()

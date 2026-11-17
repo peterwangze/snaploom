@@ -109,12 +109,12 @@ jobs:
         if: runner.os != 'Linux'
         env:
           SNAPLOOM_TEST_DESKTOP: '1'
-        run: python packaging/build.py --smoke --verify-update-from 1.0.22
+        run: python packaging/build.py --smoke --verify-update-from 1.0.23
       - name: Build and verify Linux offline installer
         if: runner.os == 'Linux'
         env:
           QT_QPA_PLATFORM: xcb
-        run: xvfb-run -a python packaging/build.py --smoke --verify-update-from 1.0.22
+        run: xvfb-run -a python packaging/build.py --smoke --verify-update-from 1.0.23
       - uses: actions/upload-artifact@v4
         with:
           name: Snaploom-${{ matrix.platform }}-${{ matrix.arch }}

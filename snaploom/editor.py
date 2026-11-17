@@ -160,7 +160,7 @@ def _paint_effect(painter, original, composited, annotation, logical_size):
     physical = _image_region(original, rect, logical_size)
     if physical.isEmpty():
         return
-    source = original if annotation.tool in {"erase", "magnify"} else composited
+    source = original if annotation.tool == "erase" else composited
     if annotation.tool == "magnify":
         center = rect.center()
         smaller = QRectF(
@@ -319,7 +319,7 @@ def render_annotations(image, annotations, corner_radius=0, logical_size=None):
     scale_x = image.deviceIndependentSize().width() / logical_size.width()
     scale_y = image.deviceIndependentSize().height() / logical_size.height()
     for annotation in annotations:
-        previous = result if annotation.tool in {"mosaic", "blur"} else None
+        previous = result if annotation.tool in EFFECT_TOOLS and annotation.tool != "erase" else None
         if previous is not None:
             result = result.copy()
         painter = QPainter(result)
@@ -510,6 +510,7 @@ class CaptureEditor(QWidget):
         self._annotation_origin = QPoint()
         self._keyboard_anchor = None
         self.hover_index = -1
+        self._painted_hover = QRect()
         self.position = QPoint(-1, -1)
         self.drag_start = QPoint()
         self.original_selection = QRect()
@@ -570,6 +571,20 @@ class CaptureEditor(QWidget):
         else:
             self.setGeometry(snapshot.geometry)
         self.toolbar = self._build_toolbar()
+        self._selection_hint = QLabel(self)
+        self._selection_hint.setObjectName("captureSelectionHint")
+        self._selection_hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._selection_hint.setTextFormat(Qt.TextFormat.PlainText)
+        self._selection_hint.setWordWrap(True)
+        self._selection_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._selection_hint.setStyleSheet(
+            "QLabel#captureSelectionHint { background: #172334; color: #f4f7fc; border: 1px solid #8ed2ff;"
+            " border-radius: 8px; padding: 6px 12px; }"
+        )
+        self._selection_hint.hide()
+        self._selection_hint_timer = QTimer(self)
+        self._selection_hint_timer.setSingleShot(True)
+        self._selection_hint_timer.timeout.connect(self._selection_hint.hide)
         self._bind_shortcuts()
         if selection is not None and not self.color_only:
             self.selection = self._local_rect(selection)
@@ -607,9 +622,12 @@ class CaptureEditor(QWidget):
             if sequence.isEmpty() or sequence.toString() in keys:
                 continue
             keys.add(sequence.toString())
-            QShortcut(sequence, self, actions[action])
+            shortcut = QShortcut(sequence, self, actions[action])
             if not self._embedded:
+                # Floating toolbar and canvas can share an active window group.
+                shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
                 shortcut = QShortcut(sequence, self.toolbar, actions[action])
+                shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
                 shortcut.setEnabled(False)
                 self._floating_shortcuts.append(shortcut)
 
@@ -807,6 +825,9 @@ class CaptureEditor(QWidget):
 
     def _set_selection(self, rect, *, defer_repaint=False):
         self.selection = QRect(rect).normalized().intersected(self.rect())
+        if not self.selection.isEmpty():
+            self._painted_hover = QRect()
+            self._selection_hint.hide()
         if not (self.document.annotations or self.document.undo_history or self.document.redo_history or self.line_points):
             self._annotation_origin = self.selection.topLeft()
         if not defer_repaint:
@@ -841,6 +862,9 @@ class CaptureEditor(QWidget):
         floating = screen is not None and (
             hint.width() > area.width() - 8 or hint.height() > area.height() - 8
         )
+        keep_canvas_focus = floating and self.hasFocus() and (
+            not self.toolbar.isVisible() or not self.toolbar.isWindow()
+        )
         if floating:
             area = available
             self._fit_tool_grid(area.width() - 8)
@@ -863,6 +887,12 @@ class CaptureEditor(QWidget):
             y = above
         else:
             y = max(area.top() + 4, area.bottom() - self.toolbar.height() - 4)
+            right = self.selection.right() + 8
+            left = self.selection.left() - self.toolbar.width() - 7
+            if right + self.toolbar.width() <= area.right() - 3:
+                x = right
+            elif left >= area.left() + 4:
+                x = left
         self.toolbar.move(self.mapToGlobal(QPoint(x, y)) if floating else QPoint(x, y))
         size_for = getattr(self.snapshot, "pixel_size", None)
         if callable(size_for):
@@ -873,6 +903,8 @@ class CaptureEditor(QWidget):
         self.dimensions.setText(f"{pixels.width()} × {pixels.height()} px")
         self.toolbar.show()
         self.toolbar.raise_()
+        if keep_canvas_focus:
+            self._focus_canvas()
 
     def set_snapshot(self, snapshot, windows=None):
         geometry = self.selected_geometry()
@@ -885,6 +917,8 @@ class CaptureEditor(QWidget):
             self.setGeometry(snapshot.geometry)
         self._base_selection = QRect()
         self._render_key = None
+        self._painted_hover = QRect()
+        self._selection_hint.hide()
         self._set_selection(self._local_rect(geometry) if not geometry.isEmpty() else QRect())
 
     def _selection_base(self):
@@ -908,6 +942,34 @@ class CaptureEditor(QWidget):
         offset = self._annotation_origin - self.selection.topLeft()
         return tuple(item.moved(offset) for item in annotations) if not offset.isNull() else annotations
 
+    def _show_selection_hint(self):
+        shortcut = QKeySequence("Ctrl+A").toString(QKeySequence.SequenceFormat.NativeText)
+        if self.auto_detect:
+            hint = self._label(
+                f"Drag to select an area, point at a window, or press {shortcut} to select the screen.",
+                f"拖动框选区域，将指针移到要截图的窗口，或按 {shortcut} 选择当前屏幕。",
+            )
+        else:
+            hint = self._label(
+                f"Drag to select an area or press {shortcut} to select the screen.",
+                f"拖动框选区域，或按 {shortcut} 选择当前屏幕。",
+            )
+        self._selection_hint.setText(hint)
+        screen = QApplication.screenAt(self.mapToGlobal(self.position)) or QApplication.primaryScreen()
+        bounds = self._local_rect(screen.availableGeometry()) if screen else self.rect()
+        if bounds.isEmpty():
+            bounds = self.rect()
+        width = min(self._selection_hint.sizeHint().width(), bounds.width() - 16)
+        if width <= 0:
+            return
+        height = self._selection_hint.heightForWidth(width)
+        x = bounds.left() + (bounds.width() - width) // 2
+        y = bounds.bottom() - height - 7 if self.position.y() < bounds.center().y() else bounds.top() + 8
+        self._selection_hint.setGeometry(x, max(bounds.top(), y), width, height)
+        self._selection_hint.show()
+        self._selection_hint.raise_()
+        self._selection_hint_timer.start(2800)
+
     def _complete(self, action, *, custom=False):
         if self.finished:
             return
@@ -915,11 +977,11 @@ class CaptureEditor(QWidget):
             self._end_keyboard_selection()
         if self.selection.isEmpty():
             hovered = self._hover_rect()
-            if not hovered.isEmpty():
-                self._set_selection(hovered)
-            else:
-                screen = QApplication.screenAt(self.mapToGlobal(self.position))
-                self._set_selection(self._local_rect(screen.geometry()) if screen is not None else self.rect())
+            if (not self.isVisible() or self.drag_mode or hovered.isEmpty() or hovered != self._painted_hover):
+                if self.isVisible() and not self._embedded:
+                    self._show_selection_hint()
+                return
+            self._set_selection(hovered)
         if self.line_points:
             self._finish_line()
         image = self.export_image()
@@ -957,6 +1019,8 @@ class CaptureEditor(QWidget):
 
     def hideEvent(self, event):
         self._magnifying = False
+        self._painted_hover = QRect()
+        self._selection_hint.hide()
         if self.toolbar.isWindow():
             self.toolbar.hide()
         super().hideEvent(event)
@@ -1568,6 +1632,7 @@ class CaptureEditor(QWidget):
         if self.color_only:
             self._copy_color()
             return
+        self._selection_hint.hide()
         self.drag_start = self.position
         self.original_selection = QRect(self.selection)
         point = self._annotation_point(self.position)
@@ -2134,8 +2199,11 @@ class CaptureEditor(QWidget):
             painter.fillPath(dim, QColor(9, 16, 29, 126))
         elif not self._embedded and self.selection.isEmpty():
             hovered = self._hover_rect()
-            if not hovered.isEmpty():
+            if event.region().intersects(self._outline_region(hovered)):
                 self._paint_outline(painter, hovered)
+                self._painted_hover = hovered
+            elif hovered != self._painted_hover:
+                self._painted_hover = QRect()
         self._paint_selection(painter)
         lens = self._visible_magnifier_rect()
         if event.region().intersects(lens):

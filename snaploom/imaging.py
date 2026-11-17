@@ -131,15 +131,19 @@ def stitch_images(before: QImage, after: QImage) -> QImage | None:
     displacement = y - start
     if quality < 0.88 or displacement < 4 or displacement > height - length - start:
         return None
-    if before.height() + displacement > 30000:
+    combined_height = before.height() + displacement
+    if combined_height > 30000 or width * combined_height > 100_000_000:
         return None
-    combined = QImage(width, before.height() + displacement, QImage.Format.Format_ARGB32_Premultiplied)
+    combined = QImage(width, combined_height, QImage.Format.Format_ARGB32_Premultiplied)
+    if combined.isNull():
+        return None
     combined.fill(Qt.GlobalColor.transparent)
     painter = QPainter(combined)
-    painter.drawImage(QPoint(), before)
+    painter.drawImage(before.rect(), before, before.rect())
     painter.drawImage(QRect(0, before.height(), width, displacement), after,
                       QRect(0, height - displacement, width, displacement))
     painter.end()
+    combined.setDevicePixelRatio(before.devicePixelRatio())
     return combined
 
 

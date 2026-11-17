@@ -17,11 +17,11 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QLocale, QLockFile, QMimeData, QObject, QPoint, QProcess, QRect, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QCursor, QDesktopServices, QIcon, QImage
+from PySide6.QtGui import QColor, QCursor, QDesktopServices, QIcon, QImage, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QInputDialog, QLabel, QListWidget, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox, QStyle, QSystemTrayIcon,
+    QInputDialog, QLabel, QListWidget, QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSpinBox, QStyle, QSystemTrayIcon,
     QTextEdit, QVBoxLayout,
 )
 
@@ -62,6 +62,7 @@ class Application:
         self.dashboard.pin_action.connect(self.pin_action)
         self.dashboard.export_action.connect(self.saved_file_action)
         self.dashboard.pin_delete_requested.connect(self.request_pin_delete)
+        self.dashboard.pin_move_requested.connect(self.move_pins_to_group)
         self.dashboard.files_dropped.connect(self.open_files)
         self.dashboard.closing.connect(self.close_dashboard)
         self.editor = None
@@ -70,6 +71,8 @@ class Application:
         self.capture_context = {}
         self.pin_windows = {}
         self.closed_pins = []
+        self.solo_pin_id = None
+        self.pins_visible_before_solo = set()
         self.last_region = next(iter(self.workspace.regions()), None)
         self.last_saved_file = None
         self.group = self.workspace.get("current_group") or "Default"
@@ -153,7 +156,7 @@ class Application:
             ("screen", "Current display", "当前屏幕"), ("full", "All displays", "所有屏幕"),
             ("active", "Active window", "当前窗口"), ("repeat", "Repeat last capture", "重复上次区域"),
             ("custom", "Size and delay…", "尺寸与延时…"), ("whiteboard", "Whiteboard…", "白板…"),
-            ("paste", "Pin clipboard content", "悬浮剪贴板内容"), ("open", "Open image…", "打开图像…"),
+            ("paste", "Pin clipboard content", "悬浮剪贴板内容"), ("open", "Pin image files…", "从图片文件新建贴图…"),
         ):
             self.tray_menu.addAction(self.tr(en, zh), lambda checked=False, name=action: self.action(name))
         self.tray_save_location = self.tray_menu.addAction(
@@ -171,6 +174,8 @@ class Application:
         groups.addSeparator()
         groups.addAction(self.tr("New group…", "新建分组…"), self.create_group)
         groups.addAction(self.tr("Manage groups…", "管理分组…"), self.manage_groups)
+        self.tray_exit_solo = self.tray_menu.addAction(self.tr("Exit solo", "退出独显"), self.exit_pin_solo)
+        self.tray_exit_solo.setVisible(self.solo_pin_id is not None)
         for action, en, zh in (
             ("restore-last-pin", "Restore last hidden pin", "恢复最近隐藏的贴图"),
             ("toggle_pins", "Show or hide pins", "显示或隐藏贴图"),
@@ -250,8 +255,10 @@ class Application:
             self.paste()
         elif action == "restore-last-pin":
             self.restore_last_pin()
+        elif action == "exit-pin-solo":
+            self.exit_pin_solo()
         elif action == "open":
-            files, _ = QFileDialog.getOpenFileNames(self.dashboard, self.tr("Open image", "打开图像"), "",
+            files, _ = QFileDialog.getOpenFileNames(self.dashboard, self.tr("Pin image files", "从图片文件新建贴图"), "",
                                                    self.tr("Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tiff *.svg)", "图像 (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tiff *.svg)"))
             self.open_files(files)
         elif action == "open-save-location":
@@ -512,8 +519,9 @@ class Application:
         return hidden
 
     def restore_capture_pins(self, pins):
-        for pin in pins:
-            if pin in self.pin_windows.values() and pin.state["group"] == self.group and pin.state["visible"]:
+        for pin_id, pin in self.pin_windows.items():
+            should_show = pin.state["visible"] if self.solo_pin_id is None else pin_id == self.solo_pin_id
+            if pin in pins and pin.state["group"] == self.group and should_show:
                 pin.show()
 
     def release_capture(self, restore_dashboard=True, *, restore_pins=True):
@@ -865,6 +873,15 @@ class Application:
             self.qt.clipboard().setText(path)
             self.status(self.tr("File path copied", "已复制文件路径"))
             return
+        if action == "open-image":
+            file = Path(path)
+            try:
+                if file.is_file() and QDesktopServices.openUrl(QUrl.fromLocalFile(str(file))):
+                    return
+            except OSError:
+                pass
+            self.notify(self.tr(f"Could not open the saved image at {file}", f"无法打开此路径中的图片 {file}"), error=True)
+            return
         folder = Path(path).parent
         try:
             if folder.is_dir() and QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
@@ -982,6 +999,8 @@ class Application:
         window.action_requested.connect(lambda action: self.pin_action(action, pin_id))
         if (state.get("visible", True) and state["group"] == self.group
                 and (not restore or self.workspace.get("restore_pins"))):
+            if not restore:
+                self.end_pin_solo()
             window.show()
         if not restore:
             window.recover_position()
@@ -1015,11 +1034,10 @@ class Application:
         if window is None:
             return
         if action == "solo":
-            for item, peer in self.pin_windows.items():
-                if item != pin_id and peer.state["group"] == window.state["group"]:
-                    self.pin_action("hide", item)
-            self.pin_action("show", pin_id)
+            self.solo_pin(pin_id, window)
             return
+        if action in {"show", "hide", "delete"}:
+            self.end_pin_solo()
         if action in {"show", "delete"} and pin_id in self.closed_pins:
             self.closed_pins.remove(pin_id)
         if action == "delete":
@@ -1030,6 +1048,7 @@ class Application:
             self.rebuild_tray()
         elif action == "hide":
             if not window.state["visible"]:
+                self.update_lists()
                 return
             window.hide()
             window.state["visible"] = False
@@ -1076,6 +1095,32 @@ class Application:
                 self.replace_pin_source(pin_id, text_image(text), {"source_text": text, "color_card": text})
         else:
             self.output(window.view, action, dialog_parent=window if action == "save" else None)
+        self.update_lists()
+
+    def move_pins_to_group(self, pin_ids, parent=None):
+        pins = {pin_id: self.pin_windows[pin_id] for pin_id in pin_ids if pin_id in self.pin_windows}
+        if not pins:
+            return
+        groups = self.groups()
+        sources = {window.state["group"] for window in pins.values()}
+        initial = next(iter(sources)) if len(sources) == 1 else self.group
+        group, ok = QInputDialog.getItem(parent or self.dashboard, self.tr("Pin group", "贴图分组"),
+                                         self.tr("Move to or create a group", "移动到分组，或输入新分组"),
+                                         groups, groups.index(initial), True)
+        group = group.strip()[:100]
+        if not ok or not group or sources == {group}:
+            return
+        groups = self.groups()
+        self.end_pin_solo()
+        if group not in groups:
+            self.workspace.set("groups", [*groups, group])
+        for pin_id in pins:
+            window = self.pin_windows.get(pin_id)
+            if window is not None and window.state["group"] != group:
+                window.state["group"] = group
+                window.setVisible(window.state["visible"] and group == self.group)
+                self.save_pin(pin_id)
+        self.rebuild_tray()
         self.update_lists()
 
     def open_pin_editor(self, pin_id, *, cropped=False, draft_image=None):
@@ -1240,6 +1285,7 @@ class Application:
         self.keep_dialog(dialog)
 
     def switch_group(self, name):
+        self.end_pin_solo()
         if name != self.group:
             self.previous_group = self.group
         self.group = name
@@ -1252,9 +1298,44 @@ class Application:
     def toggle_pins(self):
         group = [pin for pin in self.pin_windows.values() if pin.state["group"] == self.group]
         show = not any(pin.isVisible() for pin in group)
+        self.end_pin_solo()
         for pin in group:
             pin.setVisible(show and pin.state["visible"])
         self.update_lists()
+
+    def solo_pin(self, pin_id, window):
+        if self.solo_pin_id == pin_id:
+            self.exit_pin_solo()
+            return
+        self.end_pin_solo()
+        if self.group != window.state["group"]:
+            self.switch_group(window.state["group"])
+        self.solo_pin_id = pin_id
+        self.pins_visible_before_solo = {
+            item for item, pin in self.pin_windows.items() if pin.state["group"] == self.group and pin.isVisible()
+        }
+        window.recover_position()
+        for item, pin in self.pin_windows.items():
+            if pin.state["group"] == self.group:
+                pin.setVisible(item == pin_id)
+        self.update_lists()
+        self.status(self.tr("Only the selected pin is visible. Choose Exit solo to restore the previous view.",
+                            "当前仅显示所选贴图。可选择「退出独显」恢复之前的显示。"))
+
+    def end_pin_solo(self):
+        if self.solo_pin_id is None:
+            return False
+        self.solo_pin_id = None
+        for pin_id, pin in self.pin_windows.items():
+            if pin.state["group"] == self.group:
+                pin.setVisible(pin_id in self.pins_visible_before_solo and pin.state["visible"])
+        self.pins_visible_before_solo.clear()
+        return True
+
+    def exit_pin_solo(self):
+        if self.end_pin_solo():
+            self.update_lists()
+            self.status(self.tr("Previous pin visibility restored.", "已恢复独显前的贴图显示。"))
 
     def toggle_click_through(self):
         point = QCursor.pos()
@@ -1274,6 +1355,8 @@ class Application:
         self.status(self.tr("Mouse interaction restored for all pins.", "所有贴图均已恢复鼠标操作。"))
 
     def recover_pins(self, *, show=False):
+        if show:
+            self.end_pin_solo()
         for window in self.pin_windows.values():
             if window.state["group"] == self.group:
                 window.recover_position()
@@ -1349,7 +1432,8 @@ class Application:
 
     def update_lists(self):
         self.dashboard.update_history(self.workspace.history())
-        self.dashboard.update_pins(self.pin_windows, self.group)
+        self.dashboard.update_pins(self.pin_windows, self.group, self.solo_pin_id)
+        self.tray_exit_solo.setVisible(self.solo_pin_id is not None)
 
     def history_action(self, action, item_id):
         if action == "clear":
@@ -1470,38 +1554,108 @@ class Application:
             dialog.raise_()
             dialog.activateWindow()
 
-    def scroll_capture(self, initial, region, done, *, restore_dashboard=False, hidden_pins=()):
+    def scroll_capture(self, initial, region, done, *, restore_dashboard=False, hidden_pins=(), undo_heights=()):
         from .capture import CaptureError, capture_desktop
 
         self.capturing = True
         hidden_pins = list(hidden_pins)
         current = initial
         initial_dpr = initial.devicePixelRatio()
+        previous_heights = list(undo_heights)
         dialog = QDialog(None, Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self.scroll_dialog = dialog
         dialog.setWindowTitle(self.tr("Scrolling capture", "滚动截图"))
         layout = QVBoxLayout(dialog)
-        note = QLabel(self.tr("Scroll down a little in the source window, then add the next frame.",
-                              "在原窗口向下滚动一小段，再添加下一帧。"))
+        note = QLabel(self.tr("Scroll down a little in the source window. Leave some overlap with each previous frame.",
+                              "在原窗口向下滚动一小段，每次保留部分上一帧的内容。"))
         note.setWordWrap(True)
         layout.addWidget(note)
-        status = QLabel(f"{current.width()} × {current.height()}")
+        status = QLabel()
         status.setTextFormat(Qt.TextFormat.PlainText)
-        status.setWordWrap(True)
+        status.setObjectName("ScrollingCaptureStatus")
         layout.addWidget(status)
-        buttons = QHBoxLayout()
+        feedback = QLabel()
+        feedback.setTextFormat(Qt.TextFormat.PlainText)
+        feedback.setWordWrap(True)
+        layout.addWidget(feedback)
+        controls = QHBoxLayout()
         add = QPushButton(self.tr("Add next frame", "添加下一帧"))
+        undo = QPushButton(self.tr("Undo last frame", "撤回上一帧"))
+        preview = QPushButton(self.tr("Preview…", "预览拼接结果…"))
+        for button in (add, undo, preview):
+            controls.addWidget(button)
+        layout.addLayout(controls)
+        buttons = QHBoxLayout()
         save = QPushButton(self.tr("Save As…", "另存为…"))
         copy = QPushButton(self.tr("Save and Copy", "保存并复制"))
         pin = QPushButton(self.tr("Pin", "贴图"))
         cancel = QPushButton(self.tr("Cancel", "取消"))
         cancel.setAccessibleName(self.tr("Cancel scrolling capture", "取消滚动截图"))
-        for button in (add, save, copy, pin, cancel):
+        for button in (copy, save, pin, cancel):
             buttons.addWidget(button)
         layout.addLayout(buttons)
-        dialog.resize(440, 122)
         display = self.qt.screenAt(region.center()) or self.qt.primaryScreen()
-        dialog.move(display.availableGeometry().topLeft() + QPoint(8, 8))
+        available = display.availableGeometry().adjusted(8, 8, -8, -8)
+
+        def update_summary():
+            count = len(previous_heights) + 1
+            frames = self.tr("1 frame", "1 帧") if count == 1 else self.tr(f"{count} frames", f"{count} 帧")
+            status.setText(f"{frames}  ·  {current.width()} × {current.height()} px")
+            undo.setEnabled(bool(previous_heights))
+
+        update_summary()
+        dialog.resize(QSize(440, 170).expandedTo(dialog.sizeHint()))
+        panel = dialog.size()
+        # Prefer the top-left corner with a margin, then a nearby position clear of the source.
+        anchors = (
+            available.topLeft(),
+            QPoint(region.right() + 12, available.top()),
+            QPoint(region.left() - panel.width() - 12, available.top()),
+            QPoint(available.left(), region.bottom() + 12),
+            QPoint(available.left(), region.top() - panel.height() - 12),
+        )
+        dialog.move(next((point for point in anchors if available.contains(QRect(point, panel))
+                          and not region.intersects(QRect(point, panel))), available.topLeft()))
+
+        def preview_result():
+            viewer = QDialog(dialog)
+            viewer.setWindowTitle(self.tr("Scrolling screenshot preview", "滚动截图预览"))
+            viewer.setWindowModality(Qt.WindowModality.WindowModal)
+            size = display.availableGeometry().size().boundedTo(QSize(750, 710))
+            image = QImage(current)
+            image.setDevicePixelRatio(1.0)
+            width = max(1, size.width() - 60)
+            if image.width() > width:
+                image = image.scaledToWidth(width, Qt.TransformationMode.SmoothTransformation)
+            thumbnail = QLabel()
+            thumbnail.setAccessibleName(self.tr("Stitched image preview", "拼接图像预览"))
+            thumbnail.setPixmap(QPixmap.fromImage(image))
+            thumbnail.resize(thumbnail.sizeHint())
+            viewport = QScrollArea()
+            viewport.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+            viewport.setWidget(thumbnail)
+            close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            close.rejected.connect(viewer.reject)
+            preview_layout = QVBoxLayout(viewer)
+            preview_layout.addWidget(viewport)
+            preview_layout.addWidget(close)
+            viewer.resize(min(size.width(), max(360, image.width() + 44)), min(size.height(), max(240, image.height() + 72)))
+            self.keep_dialog(viewer)
+
+        def undo_frame():
+            nonlocal current
+            if not previous_heights:
+                return
+            shortened = current.copy(0, 0, current.width(), previous_heights[-1])
+            if shortened.isNull():
+                feedback.setText(self.tr("Could not undo this frame. You can still save the current image.",
+                                         "暂时无法撤回这一帧，仍可保存当前长图。"))
+                return
+            previous_heights.pop()
+            current = shortened
+            update_summary()
+            feedback.setText(self.tr("Frame removed. Return to the last retained view, then scroll down a little to continue.",
+                                     "已撤回上一帧。回到最后保留的画面，再向下滚一点即可继续。"))
 
         def next_frame():
             if not dialog.isVisible():
@@ -1519,13 +1673,16 @@ class Application:
                     next_image = snapshot.crop(region)
                     merged = stitch_images(current, next_image)
                     if merged is None:
-                        status.setText(self.tr("Overlap not found. Scroll less and try again.", "未找到重叠区域。请减小滚动幅度后重试。"))
+                        feedback.setText(self.tr("Overlap not found. Scroll down a little from the last frame and try again.",
+                                                 "未找到重叠区域。请让当前画面保留部分上一帧内容，再重试。"))
                     else:
                         merged.setDevicePixelRatio(initial_dpr)
+                        previous_heights.append(current.height())
                         current = merged
-                        status.setText(f"{current.width()} × {current.height()}")
+                        update_summary()
+                        feedback.clear()
                 except (CaptureError, RuntimeError) as error:
-                    status.setText(str(error))
+                    feedback.setText(str(error))
                 finally:
                     dialog.show()
 
@@ -1540,7 +1697,7 @@ class Application:
                 if done:
                     done(code=0, text=text)
 
-            self.output(current, action, region, complete, dialog_parent=dialog, on_error=status.setText)
+            self.output(current, action, region, complete, dialog_parent=dialog, on_error=feedback.setText)
 
         def close_scroll(result):
             self.scroll_dialog = None
@@ -1551,8 +1708,10 @@ class Application:
             if done and result == QDialog.DialogCode.Rejected:
                 done(code=1, error="Scrolling capture cancelled.")
 
-        dialog.restart_scroll = lambda: (current, region, restore_dashboard, tuple(hidden_pins))
+        dialog.restart_scroll = lambda: (current, region, restore_dashboard, tuple(hidden_pins), tuple(previous_heights))
         add.clicked.connect(next_frame)
+        undo.clicked.connect(undo_frame)
+        preview.clicked.connect(preview_result)
         save.clicked.connect(lambda: finish("save"))
         copy.clicked.connect(lambda: finish("save-copy"))
         pin.clicked.connect(lambda: finish("pin"))
@@ -1736,6 +1895,7 @@ class Application:
         elif command == "restore-pins":
             self.recover_pins(show=True)
         elif command in {"show-images", "hide-images"}:
+            self.end_pin_solo()
             for window in self.pin_windows.values():
                 if window.state["group"] == self.group:
                     window.setVisible(command == "show-images" and window.state["visible"])
